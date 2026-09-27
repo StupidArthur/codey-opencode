@@ -1,6 +1,7 @@
 export type RoundMode = 'plan' | 'vibe' | 'loop'
 export type RoundStatus = 'active' | 'completed' | 'blocked' | 'budget_exhausted' | 'failed' | 'interrupted'
 export type ExecutionOutcome = 'completed' | 'failed' | 'blocked' | 'interrupted'
+export type RunOutcome = Exclude<RoundStatus, 'active'>
 
 /** Session-level permission preset. Plan/Vibe/Loop never escalate it. */
 export type PermissionPreset = 'read-only' | 'workspace-write' | 'danger-full-access'
@@ -106,7 +107,7 @@ export interface EvidenceSummary {
 }
 
 export interface LoopTerminalSummary {
-  status: 'completed' | 'blocked' | 'budget_exhausted' | 'failed'
+  status: RunOutcome
   reason: string
 }
 
@@ -158,6 +159,15 @@ export interface RunnerEvent {
   at: string
   kind: 'thinking' | 'tool' | 'verification' | 'error' | 'status'
   message: string
+  /** Structured tool lifecycle. Rendering must not infer lifecycle from message text. */
+  tool?: {
+    callId: string
+    name: string
+    status: 'pending' | 'running' | 'completed' | 'failed'
+    startedAt?: string
+    finishedAt?: string
+    durationMs?: number
+  }
 }
 
 export interface RunStateSummary {
@@ -165,7 +175,7 @@ export interface RunStateSummary {
   status: 'idle' | 'running' | 'stopping'
   startedAt?: string
   finishedAt?: string
-  outcome?: ExecutionOutcome
+  outcome?: RunOutcome
 }
 
 export interface ModelSettings {
@@ -205,6 +215,7 @@ export interface TemporalApi {
   getModelSettings(): Promise<ModelSettings>
   saveModelSettings(settings: Omit<ModelSettings, 'hasCredential'> & { credential?: string }): Promise<ModelSettings>
   onSnapshot(listener: (snapshot: WorkspaceSnapshot) => void): () => void
+  onRunnerEvent(listener: (event: RunnerEvent) => void): () => void
 }
 
 export const IPC = {
@@ -219,5 +230,6 @@ export const IPC = {
   setPermission: 'settings:permission:set',
   getModelSettings: 'settings:model:get',
   saveModelSettings: 'settings:model:save',
-  snapshotChanged: 'workspace:changed'
+  snapshotChanged: 'workspace:changed',
+  runnerEvent: 'runner:event'
 } as const
