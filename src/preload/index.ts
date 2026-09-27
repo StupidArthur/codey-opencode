@@ -8,7 +8,7 @@ const temporal: TemporalApi = {
   getSnapshot: () => ipcRenderer.invoke(IPC.getSnapshot),
   saveDraft: (draft: string, mode: InteractiveMode) => ipcRenderer.invoke(IPC.saveDraft, draft, mode),
   submit: (spec: string, mode: InteractiveMode) => ipcRenderer.invoke(IPC.submit, spec, mode),
-  startLoop: () => ipcRenderer.invoke(IPC.startLoop),
+  startLoop: (force = false) => ipcRenderer.invoke(IPC.startLoop, force),
   cancelRun: () => ipcRenderer.invoke(IPC.cancelRun),
   endRound: () => ipcRenderer.invoke(IPC.endRound),
   setPermission: (preset) => ipcRenderer.invoke(IPC.setPermission, preset),

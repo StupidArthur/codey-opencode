@@ -92,26 +92,29 @@ planning → ready → running → terminal
 
 Planning 阶段使用 Codey 私有 Plan agent，并禁止 edit / bash / task / external directory。每次补充要求都会生成新的 Plan version。
 
-标准 Plan 包含：
+标准 Plan 使用中文撰写（代码、路径、命令和必要技术标识保留原文），包含：
 
-- Goal
-- Scope
-- Current State
-- Implementation
-- Affected Files
-- Acceptance Criteria
-- Verification
-- Constraints
-- Open Questions
+- 目标
+- 范围
+- 当前状态
+- 实施方案
+- 影响文件
+- 验收标准
+- 验证
+- 约束
+- 待确认问题
 
-Codey 使用产品自己的 Plan quality gate 判断 Plan 是否 Ready；模型不能自行宣告可以执行。只有最新 Plan 满足质量门槛且不存在未提交的 Plan 输入时，用户才能显式点击 **Start Loop**。
+Codey 使用产品自己的 Plan quality gate 判断 Plan 是否 Ready；模型不能自行宣告可以执行。英文标题仍可读取，用于兼容已有历史 Plan。
+
+当最新 Plan 满足质量门槛且不存在未提交的 Plan 输入时，用户可以正常点击 **Start Loop**。如果 Plan 信息仍不完整，界面会显示 **强制开始**：它只绕过 readiness gate，仍然冻结最新 Plan，并明确记录这次执行是 forced start。强制开始不会把缺失信息伪装成已确认事实；Loop 仍然必须基于实际 Evidence / Verification 判断完成、继续或 blocked。
 
 Start Loop 后：
 
 - 当前 Plan version 被冻结为 `approvedPlanVersionId`
+- 强制开始时同时记录 `approvedPlanForced = true`
 - OpenCode 切换到 Build agent
 - 完整 Plan 作为执行上下文
-- Acceptance Criteria + Verification 被投影为 LoopEvaluator 的验收 Spec
+- 验收标准 + 验证被投影为 LoopEvaluator 的验收 Spec
 - Codey 的 LoopController 负责 continuation、Evidence、Verification 和 completion gate
 
 执行期间不会悄悄修改 Plan。发现 Plan 假设失效或需要用户输入时，Loop 应进入 blocked / terminal，再由用户重新规划。

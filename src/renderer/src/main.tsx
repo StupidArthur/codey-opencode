@@ -67,7 +67,7 @@ function EvidenceList({ evidence }: { evidence: EvidenceSummary[] }): React.JSX.
 
 function RoundView({ round, onStartLoop, busy, pendingPlanInput }: {
   round: RoundDetail
-  onStartLoop: () => void
+  onStartLoop: (force: boolean) => void
   busy: boolean
   pendingPlanInput: boolean
 }): React.JSX.Element {
@@ -104,16 +104,20 @@ function RoundView({ round, onStartLoop, busy, pendingPlanInput }: {
       </div>}
       {!execution && round.mode === 'loop' && <section className={`plan-readiness ${isReadyPhase ? 'ready' : ''}`}>
         <div className="plan-readiness-head">
-          <div><span className="eyebrow">PLAN QUALITY GATE</span><strong>{readiness?.ready ? 'Ready for Loop' : '继续完善 Plan'}</strong></div>
+          <div><span className="eyebrow">PLAN 质量门槛</span><strong>{readiness?.ready ? '可以启动 Loop' : 'Plan 信息尚不完整'}</strong></div>
           <span>{readyCount}/{totalCount || 9}</span>
         </div>
         {readiness ? <div className="plan-checks">{readiness.checks.map(check => <div className={`plan-check ${check.ready ? 'ready' : 'missing'}`} key={check.key}><span>{check.ready ? '✓' : '○'}</span><div><strong>{check.label}</strong><small>{check.detail}</small></div></div>)}</div>
           : <p className="muted">先提交需求生成第一版标准 Loop Plan。</p>}
-        <button className="primary-button start-loop-button" onClick={onStartLoop} disabled={busy || pendingPlanInput || round.status !== 'active' || round.loopPhase !== 'ready' || !readiness?.ready || versionIndex !== latestVersionIndex}>Start Loop</button>
+        <div className="plan-start-actions">
+          <button className="primary-button start-loop-button" onClick={() => onStartLoop(false)} disabled={busy || pendingPlanInput || round.status !== 'active' || round.loopPhase !== 'ready' || !readiness?.ready || versionIndex !== latestVersionIndex}>Start Loop</button>
+          {!readiness?.ready && version && <button className="force-loop-button" onClick={() => onStartLoop(true)} disabled={busy || pendingPlanInput || round.status !== 'active' || (round.loopPhase !== 'planning' && round.loopPhase !== 'ready') || versionIndex !== latestVersionIndex}>强制开始</button>}
+        </div>
+        {!readiness?.ready && version && <small className="plan-force-note">强制开始会冻结当前 Plan 并立即进入自治执行。未满足项：{readiness?.missing.join('、') || '质量门槛未完整确认'}。Loop 仍会基于实际 Evidence / Verification 判断完成或阻塞。</small>}
         {readiness?.ready && versionIndex !== latestVersionIndex && <small className="plan-gate-note">Start Loop 只会冻结并执行最新 Ready Plan。</small>}
-        {readiness?.ready && pendingPlanInput && <small className="plan-gate-note">右侧还有未提交的 Plan 输入；先提交或清空后再 Start Loop。</small>}
+        {pendingPlanInput && <small className="plan-gate-note">右侧还有未提交的 Plan 输入；先提交或清空后再启动。</small>}
       </section>}
-      {execution && <div className="execution-plan-banner"><span className="eyebrow">APPROVED PLAN</span><strong>{round.approvedPlanVersionId ? `Executing frozen Plan ${round.planVersions.find(item => item.id === round.approvedPlanVersionId)?.ordinal ?? ''}` : 'Executing Loop Plan'}</strong></div>}
+      {execution && <div className={`execution-plan-banner ${round.approvedPlanForced ? 'forced' : ''}`}><span className="eyebrow">{round.approvedPlanForced ? '强制执行 PLAN' : '已批准 PLAN'}</span><strong>{round.approvedPlanVersionId ? `${round.approvedPlanForced ? '强制执行' : '执行'}已冻结 Plan v${round.planVersions.find(item => item.id === round.approvedPlanVersionId)?.ordinal ?? ''}` : '执行 Loop Plan'}</strong>{round.approvedPlanForced && <small>此 Plan 未通过全部质量门槛；执行和完成判断仍以实际证据为准。</small>}</div>}
       <div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{version?.planMarkdown || round.bodyMarkdown || '尚未生成 Plan。'}</ReactMarkdown></div>
       {version && version.submittedSpec.trim() && version.submittedSpec.trim() !== (version.planMarkdown ?? '').trim() && <details className="submitted-spec"><summary>本次用于完善 Plan 的输入</summary><div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{version.submittedSpec}</ReactMarkdown></div></details>}
     </>
@@ -459,14 +463,14 @@ function App(): React.JSX.Element {
     }
   }
 
-  async function startLoop(): Promise<void> {
+  async function startLoop(force = false): Promise<void> {
     if (!snapshot?.session || snapshot.running || busy) return
     setBusy(true)
     setError('')
     setCancelling(false)
     setRunnerOpen(true)
     try {
-      await window.temporal.startLoop()
+      await window.temporal.startLoop(force)
       applySnapshot(await window.temporal.getSnapshot())
     } catch (e) { setError(messageOf(e)) }
     finally { setBusy(false) }
@@ -703,7 +707,7 @@ function App(): React.JSX.Element {
         <section className="result-pane" aria-label="结果页面">
           <div className="result-scroll">
             {viewingHistoricalRound && navigationRound && <div className="history-banner"><div><span>正在查看历史</span><strong>Round {selectedRound?.sequence} · {selectedRound ? modeLabels[selectedRound.mode] : ''}</strong></div><button onClick={returnToCurrentRound}>{activeRound ? '返回当前' : '返回最新'} Round {navigationRound.sequence} →</button></div>}
-            {selectedRound ? <RoundView key={selectedRound.id} round={selectedRound} onStartLoop={() => void startLoop()} busy={busy || snapshot.running} pendingPlanInput={mode === 'loop' && Boolean(draft.trim())} />
+            {selectedRound ? <RoundView key={selectedRound.id} round={selectedRound} onStartLoop={force => void startLoop(force)} busy={busy || snapshot.running} pendingPlanInput={mode === 'loop' && Boolean(draft.trim())} />
               : snapshot.historyState === 'backend-unavailable' ? <article className="document"><div className="document-header"><div className="eyebrow">OPENCODE SESSION READY</div><h1>OpenCode runtime ready</h1><p>OpenCode Session 已在后台预热完成，但尚未产生 Temporal Round。第一次提交会沿用该 OpenCode Session 并创建 Round 1。</p></div></article>
               : <div className="blank-state"><div className="blank-symbol">⌁</div><h2>暂无结果</h2><p>在右侧写下目标，选择模式并提交。</p></div>}
           </div>
@@ -728,7 +732,7 @@ function App(): React.JSX.Element {
             <small>{snapshot.running
               ? '当前任务正在执行；这里的内容只用于下一次提交，不会改变当前运行。'
               : loopPlanning
-                ? '本次提交只会让只读 Planning Agent 生成新的 Plan 版本，不会修改 Workspace。通过质量门槛后再 Start Loop。'
+                ? '本次提交只会让只读 Planning Agent 生成新的中文 Plan 版本，不会修改 Workspace。Ready 后可正常启动；信息不足时也可以显式强制开始。'
                 : continuesActiveRound
                   ? '本次提交会继续当前 Round。'
                   : activeRound

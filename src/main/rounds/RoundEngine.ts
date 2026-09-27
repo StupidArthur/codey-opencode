@@ -132,7 +132,11 @@ export class RoundEngine {
       const baseline = await this.deps.evidence.baseline(input.session.workspacePath)
       const previous = store.listPlanVersions(round.id).at(-1)
       const prompt = loopPlanGuidance(input.spec, previous?.planMarkdown)
-      const { text } = await runtime.prompt(prompt, { agent: 'plan' })
+      let { text } = await runtime.prompt(prompt, { agent: 'plan' })
+      if (!hasChinesePlanHeadings(text)) {
+        const repaired = await runtime.prompt(chinesePlanRepairPrompt(text), { agent: 'plan' })
+        text = repaired.text
+      }
       const toolFacts = (runtime.takeToolFacts?.() ?? []).map((fact) => ({ ...fact, turn: 1 }))
       const { bundle } = await this.deps.evidence.collect(
         input.session.workspacePath, baseline, baseline, this.deps.takeEvents(), toolFacts, 'completed'
@@ -258,17 +262,28 @@ export class RoundEngine {
     }
   }
 
-  async startLoop(session: SessionSummary): Promise<{ roundId: string; outcome: RunOutcome }> {
+  async startLoop(session: SessionSummary, force = false): Promise<{ roundId: string; outcome: RunOutcome }> {
     const { store } = this.deps
     const open = store.listRounds(session.id).at(-1)
     if (!open || open.status !== 'active' || open.mode !== 'loop') throw new Error('当前没有可启动的 Loop Round。')
     const versions = store.listPlanVersions(open.id)
     const plan = versions.at(-1)
-    if (!plan?.readiness?.ready) throw new Error('Plan 尚未通过质量门槛，不能启动 Loop。')
-    if (open.loopPhase !== 'ready') throw new Error('Loop Plan 尚未进入 Ready 状态。')
+    if (!plan) throw new Error('当前 Loop 还没有可执行的 Plan。')
 
-    store.approveLoopPlan(session.id, open.id, plan.id)
-    const round = store.listRounds(session.id).find(item => item.id === open.id) ?? { ...open, loopPhase: 'running' as const, approvedPlanVersionId: plan.id }
+    if (!force) {
+      if (!plan.readiness?.ready) throw new Error('Plan 尚未通过质量门槛；请继续完善，或选择“强制开始”。')
+      if (open.loopPhase !== 'ready') throw new Error('Loop Plan 尚未进入 Ready 状态。')
+    } else if (open.loopPhase !== 'planning' && open.loopPhase !== 'ready') {
+      throw new Error('当前 Loop 阶段不能强制开始。')
+    }
+
+    store.approveLoopPlan(session.id, open.id, plan.id, force)
+    const round = store.listRounds(session.id).find(item => item.id === open.id) ?? {
+      ...open,
+      loopPhase: 'running' as const,
+      approvedPlanVersionId: plan.id,
+      ...(force ? { approvedPlanForced: true } : {})
+    }
 
     let runtime: AgentRuntime | undefined
     let cancellationBaseline: EvidenceWorkspaceSnapshot | undefined
@@ -282,7 +297,7 @@ export class RoundEngine {
       const loop = new LoopController(runtime, this.deps.evidence, undefined, Date.now, this.deps.verify)
       const result = await loop.run({
         rootSpec: loopAcceptanceSpec(plan.planMarkdown),
-        executionContext: plan.planMarkdown,
+        executionContext: force ? forcedExecutionContext(plan.planMarkdown, plan.readiness?.missing ?? []) : plan.planMarkdown,
         workspacePath: session.workspacePath,
         permission: session.permission,
         takeEvents: this.deps.takeEvents,
@@ -589,15 +604,61 @@ function loopAcceptanceSpec(planMarkdown: string): string {
     if (current) sections.get(current)?.push(line)
   }
 
-  const acceptance = (sections.get('acceptance criteria') ?? []).join('\n').trim()
-  const verificationLines = (sections.get('verification') ?? [])
+  const acceptance = sectionLines(sections, ['验收标准', 'acceptance criteria']).join('\n').trim()
+  const verificationLines = sectionLines(sections, ['验证', 'verification'])
     .map(line => /^\s*(?:[-*+] |\d+[.)]\s+)(.+)$/.exec(line)?.[1]?.trim())
     .filter((line): line is string => Boolean(line))
     .map(normalizeVerificationRequirement)
 
   return [
-    acceptance || '- Satisfy every Acceptance Criteria item in the approved Plan.',
+    acceptance || '- 完成已批准 Plan 中能够执行的目标，并基于实际证据判断结果。',
     ...verificationLines
+  ].join('\n')
+}
+
+const CHINESE_PLAN_HEADINGS = [
+  '目标', '范围', '当前状态', '实施方案', '影响文件', '验收标准', '验证', '约束', '待确认问题'
+] as const
+
+function hasChinesePlanHeadings(markdown: string): boolean {
+  const headings = new Set(
+    markdown.split(/\r?\n/)
+      .map(line => /^#{1,6}\s+(.+?)\s*$/.exec(line)?.[1]?.trim())
+      .filter((value): value is string => Boolean(value))
+  )
+  return CHINESE_PLAN_HEADINGS.every(heading => headings.has(heading))
+}
+
+function chinesePlanRepairPrompt(previousOutput: string): string {
+  return [
+    '上一份 Plan 没有满足 Codey 的中文 Plan 格式要求。',
+    '不要实现任务，不要修改 Workspace，也不要运行命令。',
+    '请把下面这份 Plan 完整重写为中文工作文档；代码、文件路径、命令、API 名称和必要技术标识可以保留原文。',
+    '必须严格使用且只使用以下一级标题，并保持顺序：',
+    ...CHINESE_PLAN_HEADINGS.map(heading => `# ${heading}`),
+    '保留原 Plan 中仍然有效的技术事实、步骤、验收标准和待确认问题，不要省略内容，也不要输出解释。',
+    '',
+    '--- 待重写 PLAN ---',
+    previousOutput
+  ].join('\n')
+}
+
+function sectionLines(sections: Map<string, string[]>, aliases: string[]): string[] {
+  for (const alias of aliases) {
+    const lines = sections.get(alias.toLowerCase())
+    if (lines) return lines
+  }
+  return []
+}
+
+function forcedExecutionContext(planMarkdown: string, missing: string[]): string {
+  return [
+    '【用户选择强制开始】',
+    '这份 Plan 尚未通过 Codey 的质量门槛。不要把缺失信息当成已确认事实，也不要伪造验收结果。',
+    missing.length > 0 ? `未通过的 Plan 项：${missing.join('、')}。` : 'Plan readiness 未完整确认。',
+    '在现有信息足够时尽量推进；如果缺失信息使安全执行、关键方案选择或真实性验证无法继续，应明确返回 blocked，而不是猜测。',
+    '',
+    planMarkdown
   ].join('\n')
 }
 
@@ -605,9 +666,9 @@ function normalizeVerificationRequirement(line: string): string {
   const unquoted = line.replace(/^\`([^\`]+)\`$/, '$1').trim()
   // Preserve LoopEvaluator's product-owned workspace-write verification path
   // for common repository checks instead of degrading them to arbitrary shell.
-  if (/\b(typecheck|tsc)\b|类型检查/i.test(unquoted)) return '- Typecheck must pass.'
-  if (/\b(test|tests|pytest)\b|\bgo\s+test\b|\bcargo\s+test\b|测试|单测/i.test(unquoted)) return '- Tests must pass.'
-  if (/\bbuild\b|构建|编译/i.test(unquoted)) return '- Build must pass.'
+  if (/\b(typecheck|tsc)\b|类型检查/i.test(unquoted)) return '- 类型检查必须通过。'
+  if (/\b(test|tests|pytest)\b|\bgo\s+test\b|\bcargo\s+test\b|测试|单测/i.test(unquoted)) return '- 测试必须通过。'
+  if (/\bbuild\b|构建|编译/i.test(unquoted)) return '- 构建必须通过。'
   return /^(?:run|verify|check|exec|execute|运行|验证|执行|检查)\s*[:：]/i.test(unquoted)
     ? unquoted
     : `Verify: ${unquoted}`

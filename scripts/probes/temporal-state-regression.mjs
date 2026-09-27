@@ -34,36 +34,36 @@ const { TURN_CANCELLED_MESSAGE } = await bundle('src/main/runtime/AgentRuntime.t
 const checks = {}
 const check = (name, value) => { checks[name] = Boolean(value) }
 
-const readyPlan = `# Goal
-Deliver the requested repository change with an observable final result.
+const readyPlan = `# 目标
+完成用户要求的仓库修改，并产生可观察、可验证的最终结果。
 
-# Scope
-- Include the requested implementation.
-- Exclude unrelated refactors.
+# 范围
+- 包含用户要求的实现。
+- 不包含无关重构。
 
-# Current State
-The relevant workspace area has been inspected and the requested behavior is not yet implemented.
+# 当前状态
+已检查相关 Workspace 区域；目标行为尚未实现。
 
-# Implementation
-1. Update the target implementation in the relevant source file.
-2. Verify the change and address any failing checks.
+# 实施方案
+1. 在相关源文件中实现目标行为。
+2. 执行验证，并处理与本次修改有关的失败项。
 
-# Affected Files
+# 影响文件
 - src/example.ts
 
-# Acceptance Criteria
-- The requested behavior is implemented in src/example.ts.
-- Existing behavior outside the requested scope remains unchanged.
+# 验收标准
+- src/example.ts 中实现用户要求的行为。
+- 请求范围之外的既有行为保持不变。
 
-# Verification
+# 验证
 - \`pnpm test\`
 - \`pnpm typecheck\`
 
-# Constraints
-None
+# 约束
+无
 
-# Open Questions
-None`
+# 待确认问题
+无`
 
 function engineFor(store, runtime, cancellation = () => false) {
   return new RoundEngine({
@@ -130,23 +130,65 @@ function engineFor(store, runtime, cancellation = () => false) {
   store.close()
 }
 
-// Loop cannot start until the product-owned Plan gate is ready.
+// Normal start still respects readiness, while the user can explicitly force
+// execution of the latest saved Plan without pretending that the Plan is Ready.
 {
   const root = await mkdtemp(join(tmpdir(), 'codey-loop-plan-gate-'))
   const workspace = join(root, 'workspace')
   await mkdir(workspace)
   const store = new ProductStore(join(root, 'product.sqlite'))
   const session = store.createSession(workspace, undefined, 'Loop plan gate')
+  const blockedDecision = {
+    decision: 'blocked',
+    reason: '缺少用户输入',
+    coverage: [{ item: '关键输入', status: 'unmet', evidence: [] }],
+    incomplete: ['关键输入'],
+    nextAction: '等待用户补充'
+  }
   const runtime = {
-    prompt: async () => ({ text: '# Goal\nDo the task.\n\n# Open Questions\nNeed user input.' })
+    prompt: async (_spec, options) => options?.agent === 'plan'
+      ? ({ text: '# 目标\n先处理当前任务。\n\n# 待确认问题\n- 仍缺少关键输入。' })
+      : ({ text: '信息不足，停止执行。\n\n\`\`\`temporal-decision\n' + JSON.stringify(blockedDecision) + '\n\`\`\`' })
   }
   const engine = engineFor(store, runtime)
-  await engine.submit({ session, mode: 'loop', spec: 'ambiguous autonomous task' })
-  const round = store.listRounds(session.id)[0]
+  await engine.submit({ session, mode: 'loop', spec: '信息还不完整的自治任务' })
+  const planned = store.listRounds(session.id)[0]
   let rejected = false
   try { await engine.startLoop(session) } catch { rejected = true }
-  check('loop_incomplete_plan_stays_planning', round.loopPhase === 'planning')
-  check('loop_incomplete_plan_cannot_start', rejected)
+  check('loop_incomplete_plan_stays_planning_before_force', planned.loopPhase === 'planning')
+  check('loop_incomplete_plan_normal_start_rejected', rejected)
+
+  const forced = await engine.startLoop(session, true)
+  const round = store.listRounds(session.id)[0]
+  check('loop_incomplete_plan_can_force_start', forced.outcome === 'blocked')
+  check('loop_force_start_is_persisted', round.approvedPlanForced === true)
+  check('loop_force_start_freezes_latest_plan', Boolean(round.approvedPlanVersionId))
+  store.close()
+}
+
+// Chinese Plan headings are first-class input to the product-owned readiness
+// gate, and a non-Chinese first reply is repaired before it is persisted.
+{
+  const root = await mkdtemp(join(tmpdir(), 'codey-chinese-plan-'))
+  const workspace = join(root, 'workspace')
+  await mkdir(workspace)
+  const store = new ProductStore(join(root, 'product.sqlite'))
+  const session = store.createSession(workspace, undefined, 'Chinese plan')
+  let planPrompts = 0
+  const englishPlan = '# Goal\nDo the requested work.\n\n# Scope\n- Requested change only.\n\n# Current State\nRepository inspected.\n\n# Implementation\n1. Change code.\n2. Verify code.\n\n# Affected Files\n- src/example.ts\n\n# Acceptance Criteria\n- Requested behavior exists.\n- Existing behavior remains.\n\n# Verification\n- `pnpm test`\n\n# Constraints\nNone\n\n# Open Questions\nNone'
+  const runtime = {
+    prompt: async () => {
+      planPrompts += 1
+      return { text: planPrompts === 1 ? englishPlan : readyPlan }
+    }
+  }
+  const engine = engineFor(store, runtime)
+  await engine.submit({ session, mode: 'loop', spec: '生成中文 Plan' })
+  const round = store.listRounds(session.id)[0]
+  const plan = store.listPlanVersions(round.id).at(-1)
+  check('chinese_plan_reaches_ready', round.loopPhase === 'ready' && plan?.readiness?.ready === true)
+  check('chinese_plan_readiness_labels_are_chinese', plan?.readiness?.checks[0]?.label === '目标')
+  check('non_chinese_plan_is_repaired_before_save', planPrompts === 2 && plan?.planMarkdown.startsWith('# 目标'))
   store.close()
 }
 

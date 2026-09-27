@@ -51,6 +51,8 @@ export interface RoundSummary {
   loopPhase?: LoopPhase
   /** Frozen plan version used by the autonomous execution. */
   approvedPlanVersionId?: string
+  /** True when the user explicitly bypassed the Plan readiness gate. */
+  approvedPlanForced?: boolean
 }
 
 export interface PlanReadinessCheck {
@@ -230,7 +232,7 @@ export interface TemporalApi {
   getSnapshot(): Promise<WorkspaceSnapshot>
   saveDraft(draft: string, mode: InteractiveMode): Promise<void>
   submit(spec: string, mode: InteractiveMode): Promise<void>
-  startLoop(): Promise<void>
+  startLoop(force?: boolean): Promise<void>
   cancelRun(): Promise<boolean>
   endRound(): Promise<void>
   setPermission(preset: PermissionPreset): Promise<void>
