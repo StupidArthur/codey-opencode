@@ -1,8 +1,8 @@
-# Temporal Workspace — OpenCode Edition
+# Codey — OpenCode Edition
 
-Temporal Workspace is an Electron + React desktop workspace focused on the interaction and presentation layer around coding agents: Temporal Rounds, Plan/Vibe/Loop modes, Result documents, a live Runner, evidence, and verification.
+Codey is an Electron + React desktop coding workspace focused on the interaction and presentation layer around coding agents: Temporal Rounds, Plan/Vibe/Loop modes, Result documents, a live Runner, evidence, and verification.
 
-This branch replaces DeepSeek Harness with **OpenCode v1.18.31** as the execution core while keeping the product UX and Temporal domain model.
+This repository is the standalone OpenCode-backed Codey product line. It uses a pinned, Codey-maintained build of **OpenCode v1.18.31** as the execution core while keeping Codey's Temporal UX and product model.
 
 ## Runtime architecture
 
@@ -37,7 +37,22 @@ The backend is intentionally frozen at:
 OpenCode CLI: 1.18.31
 ```
 
-`pnpm prepare:opencode` downloads the official Windows x64 release archive and verifies its SHA-256 before copying `opencode.exe` into `vendor/opencode`.
+`pnpm prepare:opencode` downloads Codey's pinned Windows x64 backend artifact from `StupidArthur/opencode-fork`, verifies both the archive and extracted executable SHA-256 values, checks that the binary reports `1.18.31`, and copies it into `vendor/opencode`.
+
+Pinned backend provenance:
+
+```text
+OpenCode base: 1.18.31
+Fork: StupidArthur/opencode-fork
+Source commit: cf50cd4e9294aaf260e0742ffffefca9181fd64d
+Patch lineage:
+  93dbf6f64cbf6402549289cf2eb56ee4c2474c57  ShellTool / cross-spawn inherited-stdio fix
+  cf50cd4e9294aaf260e0742ffffefca9181fd64d  public /session/:id/shell inherited-stdio fix
+Binary SHA-256:
+  03CA853EAAE717FA45A5E8BC180707F865E82F7DF6089816EBAA6988B67D259A
+```
+
+The patched build remains protocol- and version-compatible with OpenCode `1.18.31`; Codey does not use a system-installed OpenCode binary.
 
 The Windows installer bundles that binary under:
 
@@ -49,7 +64,7 @@ The application checks `/global/health` at runtime and rejects a backend whose r
 
 ## Runtime isolation and permissions
 
-Each app runtime launches a local authenticated `opencode serve` process bound to `127.0.0.1`. OpenCode data/config/cache are isolated under this edition's Electron `userData` directory.
+Each app runtime launches a local authenticated `opencode serve` process bound to `127.0.0.1`. OpenCode data/config/cache are isolated under Codey's Electron `userData` directory.
 
 Requests are routed to the selected Workspace with OpenCode's public `x-opencode-directory` mechanism.
 
@@ -100,12 +115,16 @@ D:\codey-log\session-<product-session-id>.jsonl
 
 Important OpenCode events include runtime startup, health/version checks, Session create/resume, prompt timing, SSE events, tool lifecycle, compaction, cancellation, evidence phases, and snapshot timing.
 
-## Branch
+## Repository lineage
 
-This edition is developed on:
+This repository was split from `StupidArthur/codey` after the OpenCode backend reached a validated Windows baseline. Its `main` branch preserves the full Git history of the former `backend/opencode-v1.18.31` branch.
+
+Related repositories:
 
 ```text
-backend/opencode-v1.18.31
+StupidArthur/codey-opencode  → current OpenCode-backed Codey product line
+StupidArthur/opencode-fork   → pinned OpenCode 1.18.31 backend patches
+StupidArthur/codey           → earlier DSH lineage and historical development
 ```
 
-The DSH implementation remains on the main product lineage and is not dynamically selectable in this edition. Keeping the backends as separate editions avoids a large runtime-switching compatibility layer.
+Backend switching is intentionally not implemented at runtime. Codey treats the execution core as an edition-level architectural choice rather than a per-session toggle.
