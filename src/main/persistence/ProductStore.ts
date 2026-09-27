@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { DatabaseSync, type StatementSync } from 'node:sqlite'
-import type { CheckFact, ModelSettings, RoundDetail, RoundMode, RoundSummary, SessionSummary } from '../../shared/contracts'
+import type { CheckFact, InteractiveMode, ModelSettings, PlanReadinessSummary, RoundDetail, RoundMode, RoundSummary, SessionSummary } from '../../shared/contracts'
 
 type SessionRow = {
   id: string
@@ -22,6 +22,8 @@ type RoundRow = {
   title: string
   updated_at: string
   body_markdown: string
+  loop_phase: RoundSummary['loopPhase'] | null
+  approved_plan_version_id: string | null
 }
 
 type DraftRow = { draft: string; mode: RoundMode; revision: number }
@@ -33,6 +35,7 @@ export interface PlanVersion {
   planMarkdown: string
   createdAt: string
   backendActivityRef?: string
+  readiness?: PlanReadinessSummary
 }
 
 export interface VibeEntry {
@@ -219,6 +222,12 @@ const migrations = [
       snapshot_json TEXT NOT NULL,
       created_at TEXT NOT NULL
     );
+  `,
+  `
+    ALTER TABLE rounds ADD COLUMN loop_phase TEXT
+      CHECK (loop_phase IS NULL OR loop_phase IN ('planning', 'ready', 'running', 'terminal'));
+    ALTER TABLE rounds ADD COLUMN approved_plan_version_id TEXT;
+    ALTER TABLE plan_versions ADD COLUMN readiness_json TEXT;
   `
 ] as const
 
@@ -384,7 +393,8 @@ export class ProductStore {
         ...round,
         planVersions: this.listPlanVersions(round.id).map((version, index) => ({
           id: version.id, ordinal: index + 1, submittedSpec: version.submittedSpec,
-          planMarkdown: version.planMarkdown, createdAt: version.createdAt
+          planMarkdown: version.planMarkdown, createdAt: version.createdAt,
+          ...(version.readiness ? { readiness: version.readiness } : {})
         })),
         vibeEntries: this.listVibeEntries(round.id).map((entry, index) => ({
           id: entry.id, ordinal: index + 1, specMarkdown: entry.specMarkdown,
@@ -399,7 +409,7 @@ export class ProductStore {
 
   listRounds(sessionId: string): RoundSummary[] {
     const rows = this.stmt(`
-      SELECT id, sequence, mode, status, title, updated_at, body_markdown
+      SELECT id, sequence, mode, status, title, updated_at, body_markdown, loop_phase, approved_plan_version_id
       FROM rounds WHERE product_session_id = ? ORDER BY sequence ASC
     `).all(sessionId) as RoundRow[]
     return rows.map((row) => ({
@@ -409,7 +419,9 @@ export class ProductStore {
       status: row.status,
       title: row.title,
       updatedAt: row.updated_at,
-      bodyMarkdown: row.body_markdown
+      bodyMarkdown: row.body_markdown,
+      ...(row.loop_phase ? { loopPhase: row.loop_phase } : {}),
+      ...(row.approved_plan_version_id ? { approvedPlanVersionId: row.approved_plan_version_id } : {})
     }))
   }
 
@@ -417,18 +429,20 @@ export class ProductStore {
     this.transaction(() => {
       const now = new Date().toISOString()
       const saved = this.stmt(`
-        INSERT INTO rounds(id, product_session_id, sequence, mode, status, title, body_markdown, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO rounds(id, product_session_id, sequence, mode, status, title, body_markdown, created_at, updated_at, loop_phase, approved_plan_version_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           status = excluded.status,
           title = excluded.title,
           body_markdown = excluded.body_markdown,
-          updated_at = excluded.updated_at
+          updated_at = excluded.updated_at,
+          loop_phase = excluded.loop_phase,
+          approved_plan_version_id = excluded.approved_plan_version_id
         WHERE rounds.product_session_id = excluded.product_session_id
           AND rounds.sequence = excluded.sequence
           AND rounds.mode = excluded.mode
       `).run(round.id, sessionId, round.sequence, round.mode, round.status,
-        round.title, round.bodyMarkdown, now, round.updatedAt)
+        round.title, round.bodyMarkdown, now, round.updatedAt, round.loopPhase ?? null, round.approvedPlanVersionId ?? null)
       if (saved.changes !== 1) {
         throw new Error('Round identity, sequence, or mode cannot change')
       }
@@ -486,24 +500,27 @@ export class ProductStore {
 
   appendPlanVersion(roundId: string, version: PlanVersion): void {
     this.transaction(() => {
-      this.requireRoundMode(roundId, 'plan')
+      const row = this.stmt('SELECT mode FROM rounds WHERE id = ?').get(roundId) as { mode: RoundMode } | undefined
+      if (!row || (row.mode !== 'plan' && row.mode !== 'loop')) throw new Error('Round is missing or cannot contain a Plan')
       const ordinal = this.nextOrdinal('plan_versions', roundId)
       this.stmt(`
-        INSERT INTO plan_versions(id, round_id, ordinal, submitted_spec, plan_markdown, created_at, backend_activity_ref)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO plan_versions(id, round_id, ordinal, submitted_spec, plan_markdown, created_at, backend_activity_ref, readiness_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `).run(version.id, roundId, ordinal, version.submittedSpec, version.planMarkdown,
-        version.createdAt, version.backendActivityRef ?? null)
+        version.createdAt, version.backendActivityRef ?? null,
+        version.readiness ? JSON.stringify(version.readiness) : null)
     })
   }
 
   listPlanVersions(roundId: string): PlanVersion[] {
     const rows = this.stmt(`
-      SELECT id, submitted_spec, plan_markdown, created_at, backend_activity_ref
+      SELECT id, submitted_spec, plan_markdown, created_at, backend_activity_ref, readiness_json
       FROM plan_versions WHERE round_id = ? ORDER BY ordinal
-    `).all(roundId) as Array<{ id: string; submitted_spec: string; plan_markdown: string; created_at: string; backend_activity_ref: string | null }>
+    `).all(roundId) as Array<{ id: string; submitted_spec: string; plan_markdown: string; created_at: string; backend_activity_ref: string | null; readiness_json: string | null }>
     return rows.map((row) => ({ id: row.id, submittedSpec: row.submitted_spec,
       planMarkdown: row.plan_markdown, createdAt: row.created_at,
-      ...(row.backend_activity_ref ? { backendActivityRef: row.backend_activity_ref } : {}) }))
+      ...(row.backend_activity_ref ? { backendActivityRef: row.backend_activity_ref } : {}),
+      ...(row.readiness_json ? { readiness: JSON.parse(row.readiness_json) as PlanReadinessSummary } : {}) }))
   }
 
   appendVibeEntry(roundId: string, entry: VibeEntry): void {
@@ -618,12 +635,33 @@ export class ProductStore {
       if (document) this.saveResult(round.id, document)
       const changed = this.stmt(`
         UPDATE rounds SET status = ?, title = ?, body_markdown = ?, runtime_active = 0,
+          loop_phase = CASE WHEN mode = 'loop' THEN 'terminal' ELSE loop_phase END,
           closed_at = ?, updated_at = ?
         WHERE id = ? AND product_session_id = ? AND sequence = ? AND mode = ? AND status = 'active'
       `).run(round.status, round.title, round.bodyMarkdown, now, round.updatedAt || now,
         round.id, sessionId, round.sequence, round.mode)
       if (changed.changes !== 1) throw new Error('Round is not active or its identity changed')
       this.stmt('UPDATE product_sessions SET updated_at = ? WHERE id = ?').run(now, sessionId)
+    })
+  }
+
+  /** Freeze the latest ready plan before handing control to the build agent. */
+  approveLoopPlan(sessionId: string, roundId: string, planVersionId: string): void {
+    this.transaction(() => {
+      const round = this.stmt(`
+        SELECT status, mode, loop_phase FROM rounds WHERE id = ? AND product_session_id = ?
+      `).get(roundId, sessionId) as { status: string; mode: RoundMode; loop_phase: string | null } | undefined
+      if (!round || round.mode !== 'loop' || round.status !== 'active' || round.loop_phase !== 'ready') {
+        throw new Error('Loop Plan is not ready to start')
+      }
+      const plan = this.stmt('SELECT readiness_json FROM plan_versions WHERE id = ? AND round_id = ?')
+        .get(planVersionId, roundId) as { readiness_json: string | null } | undefined
+      const readiness = plan?.readiness_json ? JSON.parse(plan.readiness_json) as PlanReadinessSummary : undefined
+      if (!plan || readiness?.ready !== true) throw new Error('Only a ready Plan version can start Loop')
+      this.stmt(`
+        UPDATE rounds SET loop_phase = 'running', approved_plan_version_id = ?, updated_at = ?
+        WHERE id = ? AND product_session_id = ?
+      `).run(planVersionId, new Date().toISOString(), roundId, sessionId)
     })
   }
 
@@ -713,19 +751,19 @@ export class ProductStore {
     return row.next
   }
 
-  getDraft(sessionId: string): { draft: string; mode: RoundMode } {
+  getDraft(sessionId: string): { draft: string; mode: InteractiveMode } {
     const row = this.stmt('SELECT draft, mode, revision FROM drafts WHERE product_session_id = ?')
       .get(sessionId) as DraftRow | undefined
-    return row ? { draft: row.draft, mode: row.mode } : { draft: '', mode: 'plan' }
+    return row ? { draft: row.draft, mode: normalizeInteractiveMode(row.mode) } : { draft: '', mode: 'vibe' }
   }
 
-  getDraftWithRevision(sessionId: string): DraftRow {
+  getDraftWithRevision(sessionId: string): { draft: string; mode: InteractiveMode; revision: number } {
     const row = this.stmt('SELECT draft, mode, revision FROM drafts WHERE product_session_id = ?')
       .get(sessionId) as DraftRow | undefined
-    return row ?? { draft: '', mode: 'plan', revision: 0 }
+    return row ? { draft: row.draft, mode: normalizeInteractiveMode(row.mode), revision: row.revision } : { draft: '', mode: 'vibe', revision: 0 }
   }
 
-  saveDraft(sessionId: string, draft: string, mode: RoundMode): void {
+  saveDraft(sessionId: string, draft: string, mode: InteractiveMode): void {
     this.stmt(`
       INSERT INTO drafts(product_session_id, draft, mode, revision, updated_at)
       VALUES (?, ?, ?, 1, ?)
@@ -787,4 +825,9 @@ function toSessionSummary(row: SessionRow): SessionSummary {
     kind: hasTemporalHistory ? 'temporal' : row.backend_session_id ? 'backend' : 'new',
     permission: (row.permission as SessionSummary['permission']) ?? 'workspace-write'
   }
+}
+
+
+function normalizeInteractiveMode(mode: RoundMode): InteractiveMode {
+  return mode === 'loop' || mode === 'plan' ? 'loop' : 'vibe'
 }
