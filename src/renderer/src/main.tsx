@@ -3,10 +3,10 @@ import { createRoot } from 'react-dom/client'
 import { EditorView, basicSetup } from 'codemirror'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import type { EvidenceSummary, InteractiveMode, ModelSettings, PermissionPreset, ResultSummary, RoundDetail, RoundMode, RunOutcome, RunnerEvent, SessionSummary, WorkspaceSnapshot } from '../../shared/contracts'
+import type { EvidenceSummary, InteractiveMode, ModelSettings, PermissionPreset, ResultSummary, RoundDetail, RoundMode, RunOutcome, RunnerEvent, SessionSummary, UiPreferences, WorkspaceSnapshot } from '../../shared/contracts'
 import './styles.css'
 
-const modeLabels: Record<RoundMode, string> = { plan: 'Plan', vibe: 'Vibe', loop: 'Loop' }
+const modeLabels: Record<RoundMode, string> = { plan: 'Plan', vibe: 'VIBE', loop: 'SPEC' }
 const loopPhaseLabels: Record<NonNullable<RoundDetail['loopPhase']>, string> = {
   planning: 'Planning', ready: 'Ready', running: 'Running', terminal: 'Terminal'
 }
@@ -36,7 +36,7 @@ const runOutcomeLabels: Record<RunOutcome, string> = {
 function ResultView({ result }: { result: ResultSummary }): React.JSX.Element {
   return <div className="result-block">
     {result.summary && <p className="result-summary">{result.summary}</p>}
-    {result.loopTerminal && <div className={`loop-terminal loop-${result.loopTerminal.status}`}><strong>Loop {statusLabels[result.loopTerminal.status] ?? result.loopTerminal.status}</strong><span>{result.loopTerminal.reason}</span></div>}
+    {result.loopTerminal && <div className={`loop-terminal loop-${result.loopTerminal.status}`}><strong>SPEC {statusLabels[result.loopTerminal.status] ?? result.loopTerminal.status}</strong><span>{result.loopTerminal.reason}</span></div>}
     {result.changes.length > 0 && <section className="result-section"><h3>Changes</h3><ul>{result.changes.map(change => <li key={change}><code>{change}</code></li>)}</ul></section>}
     {result.verification.length > 0 && <section className="result-section"><h3>Verification</h3><ul>{result.verification.map(line => <li key={line}>{line}</li>)}</ul></section>}
     {result.remaining.length > 0 && <section className="result-section remaining"><h3>Remaining</h3><ul>{result.remaining.map(line => <li key={line}>{line}</li>)}</ul></section>}
