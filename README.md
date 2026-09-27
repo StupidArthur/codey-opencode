@@ -6,7 +6,7 @@ Codey 是一个基于 Electron + React 的桌面编程工作区。它把重点�
 
 - Session
 - Round
-- Vibe / Loop
+- VIBE / SPEC
 - Result
 - Runner
 - Evidence
@@ -21,8 +21,8 @@ Codey
 ├─ Electron / React UI
 ├─ Workspace / Session
 ├─ Temporal Round
-│  ├─ Vibe
-│  └─ Loop
+│  ├─ VIBE
+│  └─ SPEC
 │     ├─ Planning / Plan versions
 │     ├─ Plan quality gate
 │     └─ Autonomous execution
@@ -44,8 +44,8 @@ Codey 负责产品层语义；OpenCode 负责底层 agent 执行。
 
 - Workspace / Session 管理
 - Round 生命周期
-- Loop Plan 版本与质量门槛
-- Vibe 连续对话
+- SPEC Plan 版本与质量门槛
+- VIBE 连续对话
 - LoopController
 - Evidence
 - Verification
@@ -68,23 +68,26 @@ Codey 负责产品层语义；OpenCode 负责底层 agent 执行。
 
 ## 两种模式
 
-### Vibe
+对外模式名是 **VIBE / SPEC**。为保持数据库和历史 Session 兼容，内部持久化值仍使用 `vibe | loop`，不会仅为了展示命名做数据迁移。
+
+
+### VIBE
 
 用于人主导的连续 coding。
 
-同一个 Vibe Round 中的多次提交：
+同一个 VIBE Round 中的多次提交：
 
 - 复用同一个 OpenCode Session
 - 使用 Codey 私有 Build agent
-- 每次输入 / 输出追加为 Vibe Entry
+- 每次输入 / 输出追加为 VIBE Entry
 - 默认聚焦最新迭代，也可切换为“全部迭代”
 - 直到 End Round 或切换模式
 
-### Loop
+### SPEC
 
-Loop 是 Plan 驱动的自治执行，不再把 Plan 作为独立模式。
+SPEC 是 Plan 驱动的自治执行，不再把 Plan 作为独立模式。
 
-一个新的 Loop Round 先进入只读 Planning：
+一个新的 SPEC Round 先进入只读 Planning：
 
 ```text
 planning → ready → running → terminal
@@ -92,32 +95,29 @@ planning → ready → running → terminal
 
 Planning 阶段使用 Codey 私有 Plan agent，并禁止 edit / bash / task / external directory。每次补充要求都会生成新的 Plan version。
 
-标准 Plan 使用中文撰写（代码、路径、命令和必要技术标识保留原文），包含：
+标准 Plan 使用中文撰写（代码、路径、命令和必要技术标识保留原文），只保留 4 个核心维度：
 
-- 目标
-- 范围
-- 当前状态
-- 实施方案
-- 影响文件
+- 目标与范围
+- 实施计划
 - 验收标准
-- 验证
-- 约束
-- 待确认问题
+- 验证方法
 
-Codey 使用产品自己的 Plan quality gate 判断 Plan 是否 Ready；模型不能自行宣告可以执行。英文标题仍可读取，用于兼容已有历史 Plan。
+其中 **实施计划** 和 **验证方法** 是主体部分，应比另外两部分更具体。原来的 Current State / Affected Files / Constraints / Open Questions 不再作为强制一级章节；相关信息按需融入四个核心章节。
 
-当最新 Plan 满足质量门槛且不存在未提交的 Plan 输入时，用户可以正常点击 **Start Loop**。如果 Plan 信息仍不完整，界面会显示 **强制开始**：它只绕过 readiness gate，仍然冻结最新 Plan，并明确记录这次执行是 forced start。强制开始不会把缺失信息伪装成已确认事实；Loop 仍然必须基于实际 Evidence / Verification 判断完成、继续或 blocked。
+Codey 使用产品自己的 Plan quality gate 判断 Plan 是否 Ready；模型不能自行宣告可以执行。英文标题和旧 9 段 Plan 仍可读取，用于兼容已有历史。
 
-Start Loop 后：
+当最新 Plan 满足质量门槛且不存在未提交的 SPEC 输入时，用户可以点击 **开始执行**。如果 Plan 信息仍不完整，界面会显示 **强制开始**：它只绕过 readiness gate，仍然冻结最新 Plan，并明确记录这次执行是 forced start。强制开始不会把缺失信息伪装成已确认事实；SPEC 仍然必须基于实际 Evidence / Verification 判断完成、继续或 blocked。
+
+开始执行后：
 
 - 当前 Plan version 被冻结为 `approvedPlanVersionId`
 - 强制开始时同时记录 `approvedPlanForced = true`
 - OpenCode 切换到 Build agent
 - 完整 Plan 作为执行上下文
-- 验收标准 + 验证被投影为 LoopEvaluator 的验收 Spec
+- 验收标准 + 验证方法被投影为 LoopEvaluator 的验收 Spec
 - Codey 的 LoopController 负责 continuation、Evidence、Verification 和 completion gate
 
-执行期间不会悄悄修改 Plan。发现 Plan 假设失效或需要用户输入时，Loop 应进入 blocked / terminal，再由用户重新规划。
+执行期间不会悄悄修改 Plan。发现 Plan 假设失效或需要用户输入时，SPEC 应进入 blocked / terminal，再由用户重新规划。
 
 旧版本中的独立 Plan Round 仍然可以读取，但不会再用于创建新的工作。
 
@@ -134,7 +134,7 @@ Verification
 Remaining
 ```
 
-Loop 还会记录 terminal 状态，用来区分真正完成、被阻塞、达到预算或被用户中止。
+SPEC 还会记录 terminal 状态，用来区分真正完成、被阻塞、达到预算或被用户中止。
 
 ## Runner
 
@@ -244,6 +244,24 @@ Codey 每个运行时会：
 - 禁止 OpenCode 自动更新
 
 项目中的普通 `opencode.json` 不能替换 Codey 私有 Plan / Build agent，也不能放宽 Codey 最终施加的权限预设。
+
+## 工作台偏好
+
+纯 UI 操作习惯保存在用户主目录：
+
+```text
+~/.codey/config.json
+```
+
+Windows 下即用户主目录中的 `.codey\\config.json`。当前保存：
+
+- 左侧时间线是否收起
+- Runner / 控制台是否展开
+- Document / Spec 两块区域的比例
+
+这些偏好不进入 Workspace / Session SQLite，也不写入项目目录。配置缺失、字段缺失或 JSON 损坏时会回退到默认布局。
+
+Runner 的展开/收起完全由用户手动控制。启动 VIBE、生成/执行 SPEC、任务结束或报错都不会自动打开或关闭 Runner。
 
 ## Prewarm
 
