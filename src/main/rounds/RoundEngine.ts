@@ -64,6 +64,7 @@ export class RoundEngine {
       const baselineStartedAt = Date.now()
       this.deps.onDiagnostic?.('evidence.baseline.start', { mode, roundId: round.id })
       const baseline = await this.deps.evidence.baseline(input.session.workspacePath)
+      if (mode === 'vibe') store.saveRoundBaseline(round.id, serializeEvidenceSnapshot(baseline))
       this.deps.onDiagnostic?.('evidence.baseline.end', { mode, roundId: round.id, durationMs: Date.now() - baselineStartedAt })
       throwIfCancelled(this.deps.isCancellationRequested)
       // Plan turns carry product-owned guidance on the SAME OpenCode session; the
@@ -177,8 +178,10 @@ export class RoundEngine {
           }]
         }
       })
-      store.saveResult(round.id, document)
-      this.terminate(input.session, round, toRoundStatus(result.terminal.status), result.finalResponse)
+      round.status = toRoundStatus(result.terminal.status)
+      round.bodyMarkdown = result.finalResponse
+      round.updatedAt = new Date().toISOString()
+      store.commitRoundTerminal(input.session.id, round, document)
       await this.deps.onRoundChanged?.()
       return { roundId: round.id, outcome: result.terminal.status }
     } catch (error) {
@@ -216,8 +219,9 @@ export class RoundEngine {
             turns: [{ spec: input.spec, outcome: 'interrupted', output: '' }]
           }
         })
-        store.saveResult(round.id, document)
-        this.terminate(input.session, round, 'interrupted')
+        round.status = 'interrupted'
+        round.updatedAt = new Date().toISOString()
+        store.commitRoundTerminal(input.session.id, round, document)
         await this.deps.onRoundChanged?.()
         return { roundId: round.id, outcome: 'interrupted' }
       }
@@ -227,15 +231,43 @@ export class RoundEngine {
     }
   }
 
-  /** Finalize an open Plan/Vibe Round; Vibe gets a top-level Result document
-   *  built from the WHOLE conversation of the round, not the last reply. */
+  /** Finalize an open Plan/Vibe Round. The terminal page is committed
+   *  atomically, and Vibe Changes are re-projected from the Round baseline so
+   *  edit-then-revert activity does not masquerade as a final workspace delta. */
   private async finalize(session: SessionSummary, round: RoundSummary): Promise<void> {
     const { store } = this.deps
+    let document: ReturnType<ResultBuilder['build']> | undefined
+
     if (round.mode === 'vibe') {
       const entries = store.listVibeEntries(round.id)
       const last = entries.at(-1)
-      const evidence = bundleFromRecords(store.listEvidence(round.id))
-      const document = this.deps.resultBuilder.build({
+      let evidence = bundleFromRecords(store.listEvidence(round.id), last?.executionOutcome ?? 'completed')
+      const savedBaseline = store.getRoundBaseline(round.id)
+      if (savedBaseline) {
+        try {
+          const baseline = deserializeEvidenceSnapshot(savedBaseline)
+          const projected = await this.deps.evidence.collect(
+            session.workspacePath,
+            baseline,
+            baseline,
+            [],
+            [],
+            last?.executionOutcome ?? 'completed'
+          )
+          // Verification history remains factual across the Round; workspace
+          // observations are replaced by the final baseline→current projection.
+          projected.bundle.verification = evidence.verification
+          evidence = projected.bundle
+          store.deleteEvidenceKind(round.id, 'workspace')
+          for (const record of this.deps.evidence.toRecords(evidence)) {
+            if (record.kind === 'workspace') store.saveEvidence(round.id, record)
+          }
+        } catch {
+          // Older or corrupt baselines fall back to the persisted evidence
+          // projection rather than preventing the Round from closing.
+        }
+      }
+      document = this.deps.resultBuilder.build({
         finalResponse: last?.assistantOutput ?? '',
         evidence,
         outcome: last?.executionOutcome ?? 'completed',
@@ -244,13 +276,11 @@ export class RoundEngine {
           turns: entries.map((entry) => ({ spec: entry.specMarkdown, outcome: entry.executionOutcome, output: entry.assistantOutput }))
         }
       })
-      store.saveResult(round.id, document)
     } else if (round.mode === 'plan') {
-      // A Plan round also records what the phase produced: every version.
       const versions = store.listPlanVersions(round.id)
       if (versions.length > 0) {
         const evidence = bundleFromRecords(store.listEvidence(round.id))
-        const document = this.deps.resultBuilder.build({
+        document = this.deps.resultBuilder.build({
           finalResponse: versions.at(-1)?.planMarkdown ?? '',
           evidence,
           outcome: 'completed',
@@ -259,12 +289,12 @@ export class RoundEngine {
             turns: versions.map((version) => ({ spec: version.submittedSpec, outcome: 'completed' as const, output: version.planMarkdown }))
           }
         })
-        store.saveResult(round.id, document)
       }
     }
+
     round.status = 'completed'
     round.updatedAt = new Date().toISOString()
-    store.saveRound(session.id, round)
+    store.commitRoundTerminal(session.id, round, document)
     await this.deps.onRoundChanged?.()
   }
 
@@ -304,6 +334,33 @@ export class RoundEngine {
 
   private saveEvidence(roundId: string, evidence: EvidenceBundle): void {
     for (const record of this.deps.evidence.toRecords(evidence)) this.deps.store.saveEvidence(roundId, record)
+  }
+}
+
+function serializeEvidenceSnapshot(snapshot: EvidenceWorkspaceSnapshot): string {
+  return JSON.stringify({
+    git: snapshot.git,
+    preexisting: [...snapshot.preexisting],
+    files: [...snapshot.files.entries()],
+    dirty: [...snapshot.dirty.entries()],
+    fileStates: [...snapshot.fileStates.entries()]
+  })
+}
+
+function deserializeEvidenceSnapshot(raw: string): EvidenceWorkspaceSnapshot {
+  const parsed = JSON.parse(raw) as {
+    git: boolean
+    preexisting: string[]
+    files: Array<[string, { mtimeMs: number; size: number; hash?: string }]>
+    dirty: Array<[string, string]>
+    fileStates: Array<[string, { exists: boolean; mtimeMs: number; size: number; hash?: string }]>
+  }
+  return {
+    git: parsed.git,
+    preexisting: new Set(parsed.preexisting),
+    files: new Map(parsed.files),
+    dirty: new Map(parsed.dirty),
+    fileStates: new Map(parsed.fileStates)
   }
 }
 
