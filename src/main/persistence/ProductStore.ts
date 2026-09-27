@@ -77,7 +77,7 @@ export interface ResultDocument {
   remaining: string[]
   createdAt: string
   loopTerminal?: {
-    status: 'completed' | 'blocked' | 'budget_exhausted' | 'failed'
+    status: 'completed' | 'blocked' | 'budget_exhausted' | 'failed' | 'interrupted'
     reason: string
   }
   coverage?: Array<{
@@ -212,6 +212,13 @@ const migrations = [
     ALTER TABLE round_evidence ADD COLUMN request_id TEXT;
     ALTER TABLE round_evidence ADD COLUMN input_fingerprint TEXT;
     ALTER TABLE round_evidence ADD COLUMN check_object TEXT;
+  `,
+  `
+    CREATE TABLE round_baselines (
+      round_id TEXT PRIMARY KEY REFERENCES rounds(id) ON DELETE CASCADE,
+      snapshot_json TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
   `
 ] as const
 
@@ -371,20 +378,23 @@ export class ProductStore {
 
   /** Full per-Round projection for the renderer: versions, entries, evidence and result. */
   listRoundDetails(sessionId: string): RoundDetail[] {
-    return this.listRounds(sessionId).map((round) => ({
-      ...round,
-      planVersions: this.listPlanVersions(round.id).map((version, index) => ({
-        id: version.id, ordinal: index + 1, submittedSpec: version.submittedSpec,
-        planMarkdown: version.planMarkdown, createdAt: version.createdAt
-      })),
-      vibeEntries: this.listVibeEntries(round.id).map((entry, index) => ({
-        id: entry.id, ordinal: index + 1, specMarkdown: entry.specMarkdown,
-        assistantOutput: entry.assistantOutput, executionOutcome: entry.executionOutcome,
-        createdAt: entry.createdAt
-      })),
-      evidence: this.listEvidence(round.id),
-      ...(this.getResult(round.id) ? { result: this.getResult(round.id)! } : {})
-    }))
+    return this.listRounds(sessionId).map((round) => {
+      const result = this.getResult(round.id)
+      return {
+        ...round,
+        planVersions: this.listPlanVersions(round.id).map((version, index) => ({
+          id: version.id, ordinal: index + 1, submittedSpec: version.submittedSpec,
+          planMarkdown: version.planMarkdown, createdAt: version.createdAt
+        })),
+        vibeEntries: this.listVibeEntries(round.id).map((entry, index) => ({
+          id: entry.id, ordinal: index + 1, specMarkdown: entry.specMarkdown,
+          assistantOutput: entry.assistantOutput, executionOutcome: entry.executionOutcome,
+          createdAt: entry.createdAt
+        })),
+        evidence: this.listEvidence(round.id),
+        ...(result ? { result } : {})
+      }
+    })
   }
 
   listRounds(sessionId: string): RoundSummary[] {
@@ -571,6 +581,25 @@ export class ProductStore {
     })
   }
 
+  deleteEvidenceKind(roundId: string, kind: EvidenceRecord['kind']): void {
+    this.stmt('DELETE FROM round_evidence WHERE round_id = ? AND kind = ?').run(roundId, kind)
+  }
+
+  /** First-write-wins Round baseline used to project final net workspace changes. */
+  saveRoundBaseline(roundId: string, snapshotJson: string): void {
+    this.stmt(`
+      INSERT OR IGNORE INTO round_baselines(round_id, snapshot_json, created_at)
+      VALUES (?, ?, ?)
+    `).run(roundId, snapshotJson, new Date().toISOString())
+  }
+
+  getRoundBaseline(roundId: string): string | undefined {
+    const row = this.stmt('SELECT snapshot_json FROM round_baselines WHERE round_id = ?')
+      .get(roundId) as { snapshot_json: string } | undefined
+    return row?.snapshot_json
+  }
+
+
   saveResult(roundId: string, document: ResultDocument): void {
     const now = new Date().toISOString()
     this.stmt(`
@@ -579,6 +608,23 @@ export class ProductStore {
       ON CONFLICT(round_id) DO UPDATE SET document_json = excluded.document_json,
         updated_at = excluded.updated_at
     `).run(roundId, JSON.stringify(document), now, now)
+  }
+
+  /** Persist a stable historical page atomically: Result and terminal Round
+   *  status become visible together, never one without the other. */
+  commitRoundTerminal(sessionId: string, round: RoundSummary, document?: ResultDocument): void {
+    this.transaction(() => {
+      const now = new Date().toISOString()
+      if (document) this.saveResult(round.id, document)
+      const changed = this.stmt(`
+        UPDATE rounds SET status = ?, title = ?, body_markdown = ?, runtime_active = 0,
+          closed_at = ?, updated_at = ?
+        WHERE id = ? AND product_session_id = ? AND sequence = ? AND mode = ? AND status = 'active'
+      `).run(round.status, round.title, round.bodyMarkdown, now, round.updatedAt || now,
+        round.id, sessionId, round.sequence, round.mode)
+      if (changed.changes !== 1) throw new Error('Round is not active or its identity changed')
+      this.stmt('UPDATE product_sessions SET updated_at = ? WHERE id = ?').run(now, sessionId)
+    })
   }
 
   getResult(roundId: string): ResultDocument | undefined {
