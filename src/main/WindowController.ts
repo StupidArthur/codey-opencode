@@ -101,7 +101,7 @@ export class WindowController {
       void this.emitSnapshot()
     })
     try {
-      this.store.reconcileInterruptedRounds(nextSession.id)
+      await this.engine.reconcileInterrupted(nextSession)
       await this.releaseCurrent()
       this.lease = nextLease
       this.workspacePath = workspacePath
