@@ -32,6 +32,7 @@ const evidenceOutcomeLabels: Record<EvidenceSummary['outcome'], string> = {
 const runOutcomeLabels: Record<RunOutcome, string> = {
   completed: '完成', failed: '失败', blocked: '阻塞', budget_exhausted: '预算耗尽', interrupted: '中断'
 }
+const defaultUiPreferences: UiPreferences = { sidebarCollapsed: false, runnerOpen: false, specPaneRatio: 0.42 }
 
 function ResultView({ result }: { result: ResultSummary }): React.JSX.Element {
   return <div className="result-block">
@@ -287,19 +288,15 @@ function App(): React.JSX.Element {
   const [mode, setMode] = useState<InteractiveMode>('vibe')
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [sourceView, setSourceView] = useState(true)
-  const [runnerOpen, setRunnerOpen] = useState(false)
+  const [runnerOpen, setRunnerOpen] = useState(defaultUiPreferences.runnerOpen)
   const [runnerEvents, setRunnerEvents] = useState<RunnerEvent[]>([])
   const [runnerNow, setRunnerNow] = useState(() => Date.now())
   const [runnerHasNewEvents, setRunnerHasNewEvents] = useState(false)
   const [cancelling, setCancelling] = useState(false)
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(defaultUiPreferences.sidebarCollapsed)
   const [sidebarWidth, setSidebarWidth] = useState(() => Number(window.localStorage.getItem('codey.sidebarWidth')) || 196)
-  const [specWidth, setSpecWidth] = useState(() => {
-    const saved = Number(window.localStorage.getItem('codey.specWidth'))
-    // Migrate the previous 390px default to the roomier Spec layout. Preserve
-    // any deliberate custom width the user already chose.
-    return saved && saved !== 390 ? saved : 480
-  })
+  const [specPaneRatio, setSpecPaneRatio] = useState(defaultUiPreferences.specPaneRatio)
+  const [workspaceWidth, setWorkspaceWidth] = useState(() => window.innerWidth)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [settings, setSettings] = useState<ModelSettings | null>(null)
   const [permission, setPermission] = useState<PermissionPreset>('workspace-write')
@@ -315,7 +312,30 @@ function App(): React.JSX.Element {
   const runnerFollowLatest = useRef(true)
   const previousRunnerEventCount = useRef(0)
   const latest = useRef({ draft, mode })
+  const uiPreferencesRef = useRef<UiPreferences>(defaultUiPreferences)
   latest.current = { draft, mode }
+  uiPreferencesRef.current = { sidebarCollapsed, runnerOpen, specPaneRatio }
+
+  function persistUiPreferences(next: UiPreferences): void {
+    uiPreferencesRef.current = next
+    void window.temporal.saveUiPreferences(next).catch(e => setError(`界面偏好保存失败：${messageOf(e)}`))
+  }
+
+  function setSidebarCollapsedByUser(next: boolean): void {
+    setSidebarCollapsed(next)
+    persistUiPreferences({ ...uiPreferencesRef.current, sidebarCollapsed: next })
+  }
+
+  function setRunnerOpenByUser(next: boolean): void {
+    setRunnerOpen(next)
+    persistUiPreferences({ ...uiPreferencesRef.current, runnerOpen: next })
+  }
+
+  function setSpecPaneRatioByUser(next: number): void {
+    const ratio = Math.max(0.25, Math.min(0.7, next))
+    setSpecPaneRatio(ratio)
+    persistUiPreferences({ ...uiPreferencesRef.current, specPaneRatio: ratio })
+  }
 
   function applySnapshot(next: WorkspaceSnapshot): void {
     const previous = snapshotRef.current
@@ -354,7 +374,6 @@ function App(): React.JSX.Element {
     if (next.running && !previous?.running && !selectionPinned.current) {
       runnerFollowLatest.current = true
       setRunnerHasNewEvents(false)
-      setRunnerOpen(true)
     }
     if (previous?.running && !next.running) {
       // Keep the completed Runner visible so the final tool/verification/error
@@ -370,6 +389,13 @@ function App(): React.JSX.Element {
       if (!active) return
       setRunnerEvents(previous => [...previous, event].slice(-200))
     })
+    void window.temporal.getUiPreferences().then(preferences => {
+      if (!active) return
+      uiPreferencesRef.current = preferences
+      setSidebarCollapsed(preferences.sidebarCollapsed)
+      setRunnerOpen(preferences.runnerOpen)
+      setSpecPaneRatio(preferences.specPaneRatio)
+    }).catch(e => { if (active) setError(`界面偏好读取失败：${messageOf(e)}`) })
     window.temporal.getSnapshot().then(next => {
       if (!active) return
       applySnapshot(next)
@@ -381,10 +407,6 @@ function App(): React.JSX.Element {
   useEffect(() => {
     window.localStorage.setItem('codey.sidebarWidth', String(sidebarWidth))
   }, [sidebarWidth])
-
-  useEffect(() => {
-    window.localStorage.setItem('codey.specWidth', String(specWidth))
-  }, [specWidth])
 
   useEffect(() => {
     if (!workspacePath || snapshot?.session) return
