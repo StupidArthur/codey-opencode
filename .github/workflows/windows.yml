@@ -45,7 +45,7 @@ jobs:
         shell: pwsh
         run: |
           $env:ELECTRON_RUN_AS_NODE = "1"
-          .\node_modules\electron\dist\electron.exe scripts/probes/temporal-state-regression.mjs
+          pnpm exec electron scripts/probes/temporal-state-regression.mjs
 
       - name: Static OpenCode contract probe
         run: pnpm probe:opencode
