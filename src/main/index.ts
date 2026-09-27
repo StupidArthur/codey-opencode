@@ -70,6 +70,7 @@ function registerIpc(): void {
   ipcMain.handle(IPC.getSnapshot, (event) => controllerFor(event.sender.id).getSnapshot())
   ipcMain.handle(IPC.saveDraft, (event, draft, mode) => controllerFor(event.sender.id).saveDraft(draft, mode))
   ipcMain.handle(IPC.submit, (event, spec, mode) => controllerFor(event.sender.id).submit(spec, mode))
+  ipcMain.handle(IPC.startLoop, (event) => controllerFor(event.sender.id).startLoop())
   ipcMain.handle(IPC.cancelRun, (event) => controllerFor(event.sender.id).cancelRun())
   ipcMain.handle(IPC.endRound, (event) => controllerFor(event.sender.id).endRound())
   ipcMain.handle(IPC.setPermission, (event, preset) => controllerFor(event.sender.id).setPermission(preset))
