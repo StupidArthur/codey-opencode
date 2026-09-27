@@ -62,10 +62,11 @@ function EvidenceList({ evidence }: { evidence: EvidenceSummary[] }): React.JSX.
   </section>
 }
 
-function RoundView({ round, onStartLoop, busy }: {
+function RoundView({ round, onStartLoop, busy, pendingPlanInput }: {
   round: RoundDetail
   onStartLoop: () => void
   busy: boolean
+  pendingPlanInput: boolean
 }): React.JSX.Element {
   const latestVersionIndex = Math.max(round.planVersions.length - 1, 0)
   const [versionIndex, setVersionIndex] = useState(latestVersionIndex)
@@ -105,8 +106,9 @@ function RoundView({ round, onStartLoop, busy }: {
         </div>
         {readiness ? <div className="plan-checks">{readiness.checks.map(check => <div className={`plan-check ${check.ready ? 'ready' : 'missing'}`} key={check.key}><span>{check.ready ? '✓' : '○'}</span><div><strong>{check.label}</strong><small>{check.detail}</small></div></div>)}</div>
           : <p className="muted">先提交需求生成第一版标准 Loop Plan。</p>}
-        <button className="primary-button start-loop-button" onClick={onStartLoop} disabled={busy || round.status !== 'active' || round.loopPhase !== 'ready' || !readiness?.ready || versionIndex !== latestVersionIndex}>Start Loop</button>
+        <button className="primary-button start-loop-button" onClick={onStartLoop} disabled={busy || pendingPlanInput || round.status !== 'active' || round.loopPhase !== 'ready' || !readiness?.ready || versionIndex !== latestVersionIndex}>Start Loop</button>
         {readiness?.ready && versionIndex !== latestVersionIndex && <small className="plan-gate-note">Start Loop 只会冻结并执行最新 Ready Plan。</small>}
+        {readiness?.ready && pendingPlanInput && <small className="plan-gate-note">右侧还有未提交的 Plan 输入；先提交或清空后再 Start Loop。</small>}
       </section>}
       {execution && <div className="execution-plan-banner"><span className="eyebrow">APPROVED PLAN</span><strong>{round.approvedPlanVersionId ? `Executing frozen Plan ${round.planVersions.find(item => item.id === round.approvedPlanVersionId)?.ordinal ?? ''}` : 'Executing Loop Plan'}</strong></div>}
       <div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{version?.planMarkdown || round.bodyMarkdown || '尚未生成 Plan。'}</ReactMarkdown></div>
@@ -698,7 +700,7 @@ function App(): React.JSX.Element {
         <section className="result-pane" aria-label="结果页面">
           <div className="result-scroll">
             {viewingHistoricalRound && navigationRound && <div className="history-banner"><div><span>正在查看历史</span><strong>Round {selectedRound?.sequence} · {selectedRound ? modeLabels[selectedRound.mode] : ''}</strong></div><button onClick={returnToCurrentRound}>{activeRound ? '返回当前' : '返回最新'} Round {navigationRound.sequence} →</button></div>}
-            {selectedRound ? <RoundView key={selectedRound.id} round={selectedRound} onStartLoop={() => void startLoop()} busy={busy || snapshot.running} />
+            {selectedRound ? <RoundView key={selectedRound.id} round={selectedRound} onStartLoop={() => void startLoop()} busy={busy || snapshot.running} pendingPlanInput={Boolean(draft.trim())} />
               : snapshot.historyState === 'backend-unavailable' ? <article className="document"><div className="document-header"><div className="eyebrow">OPENCODE SESSION READY</div><h1>OpenCode runtime ready</h1><p>OpenCode Session 已在后台预热完成，但尚未产生 Temporal Round。第一次提交会沿用该 OpenCode Session 并创建 Round 1。</p></div></article>
               : <div className="blank-state"><div className="blank-symbol">⌁</div><h2>暂无结果</h2><p>在右侧写下目标，选择模式并提交。</p></div>}
           </div>
