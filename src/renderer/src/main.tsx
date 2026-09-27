@@ -700,7 +700,7 @@ function App(): React.JSX.Element {
         <section className="result-pane" aria-label="结果页面">
           <div className="result-scroll">
             {viewingHistoricalRound && navigationRound && <div className="history-banner"><div><span>正在查看历史</span><strong>Round {selectedRound?.sequence} · {selectedRound ? modeLabels[selectedRound.mode] : ''}</strong></div><button onClick={returnToCurrentRound}>{activeRound ? '返回当前' : '返回最新'} Round {navigationRound.sequence} →</button></div>}
-            {selectedRound ? <RoundView key={selectedRound.id} round={selectedRound} onStartLoop={() => void startLoop()} busy={busy || snapshot.running} pendingPlanInput={Boolean(draft.trim())} />
+            {selectedRound ? <RoundView key={selectedRound.id} round={selectedRound} onStartLoop={() => void startLoop()} busy={busy || snapshot.running} pendingPlanInput={mode === 'loop' && Boolean(draft.trim())} />
               : snapshot.historyState === 'backend-unavailable' ? <article className="document"><div className="document-header"><div className="eyebrow">OPENCODE SESSION READY</div><h1>OpenCode runtime ready</h1><p>OpenCode Session 已在后台预热完成，但尚未产生 Temporal Round。第一次提交会沿用该 OpenCode Session 并创建 Round 1。</p></div></article>
               : <div className="blank-state"><div className="blank-symbol">⌁</div><h2>暂无结果</h2><p>在右侧写下目标，选择模式并提交。</p></div>}
           </div>
