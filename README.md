@@ -1,130 +1,387 @@
-# Codey — OpenCode Edition
+# Codey — OpenCode 版
 
-Codey is an Electron + React desktop coding workspace focused on the interaction and presentation layer around coding agents: Temporal Rounds, Plan/Vibe/Loop modes, Result documents, a live Runner, evidence, and verification.
+Codey 是一个基于 Electron + React 的桌面编程工作区。它把重点放在 coding agent 的交互方式和结果呈现上，而不是重新实现一套通用 agent harness。
 
-This repository is the standalone OpenCode-backed Codey product line. It uses a pinned, Codey-maintained build of **OpenCode v1.18.31** as the execution core while keeping Codey's Temporal UX and product model.
+当前主线使用经过固定和补丁维护的 **OpenCode 1.18.31** 作为执行核心，并在其上实现 Codey 自己的 Temporal 产品模型：
 
-## Runtime architecture
+- Session
+- Round
+- Plan / Vibe / Loop
+- Result
+- Runner
+- Evidence
+- Verification
+
+目前主要验证平台是 **Windows x64**。
+
+## 核心结构
 
 ```text
-Temporal Workspace
+Codey
 ├─ Electron / React UI
-├─ Session → Round → Result product model
-├─ Plan / Vibe / Loop behavior
-├─ Runner event projection
-├─ Evidence / verification / Result projection
+├─ Workspace / Session
+├─ Temporal Round
+│  ├─ Plan
+│  ├─ Vibe
+│  └─ Loop
+├─ Result
+├─ Runner
+├─ Evidence / Verification
 └─ OpenCodeRuntime
-   └─ bundled OpenCode CLI v1.18.31
-      ├─ private Codey Plan agent
-      ├─ private Codey Build agent
-      ├─ OpenCode tools / MCP / compaction
+   └─ bundled OpenCode 1.18.31
+      ├─ Codey 私有 Plan agent
+      ├─ Codey 私有 Build agent
+      ├─ OpenCode tools / MCP
+      ├─ context / compaction
       └─ OpenCode Session persistence
 ```
 
-Mode mapping:
+Codey 负责产品层语义；OpenCode 负责底层 agent 执行。
 
-- **Plan** → a private OpenCode primary agent with edit, bash, task, and external-directory access denied. Codey adds only the plan-document formatting guidance.
-- **Vibe** → a private OpenCode build agent.
-- **Loop** → Codey's LoopController drives repeated turns through the same private OpenCode build agent, then applies Codey's evidence and completion gate.
+### Codey 负责
 
-All three modes reuse one OpenCode Session. OpenCode owns conversation context, tool execution, native compaction, and backend persistence. Codey's SQLite database stores only product projection data such as Rounds, drafts, Result documents, evidence, and the OpenCode Session id.
+- Workspace / Session 管理
+- Round 生命周期
+- Plan 版本
+- Vibe 连续对话
+- LoopController
+- Evidence
+- Verification
+- Result
+- Runner 展示
+- 产品权限预设
+- SQLite 产品投影数据
 
-## Pinned backend
+### OpenCode 负责
 
-The backend is intentionally frozen at:
+- agent Session
+- 模型与 provider
+- 上下文
+- compaction
+- 文件 / 搜索 / 编辑 / shell 工具
+- MCP
+- subagent
+- 工具生命周期
+- backend persistence
+
+## 三种模式
+
+### Plan
+
+用于分析和规划。
+
+Codey 会调用私有 Plan agent，并禁止：
+
+- edit
+- bash
+- task / subagent
+- external directory
+
+Plan 可以持续修改同一个 Round 中的计划版本，但不能修改 Workspace。
+
+### Vibe
+
+用于普通连续 coding 对话。
+
+同一个 Vibe Round 中的多次提交：
+
+- 复用同一个 OpenCode Session
+- 连续保留上下文
+- 每次输入 / 输出追加到当前 Round
+- 直到 End Round 或切换模式
+
+### Loop
+
+用于长任务和带验收条件的任务。
+
+Loop 由 Codey 的 LoopController 驱动，底层每一轮仍然复用同一个 OpenCode Build agent / Session。
+
+Codey 负责：
+
+- continuation policy
+- evidence
+- verification
+- completion gate
+- 最终 Result
+
+## Result
+
+Round 结束后，Codey 使用统一的结果结构：
 
 ```text
-OpenCode CLI: 1.18.31
+Result
+
+Summary
+Changes
+Verification
+Remaining
 ```
 
-`pnpm prepare:opencode` downloads Codey's pinned Windows x64 backend artifact from `StupidArthur/opencode-fork`, verifies both the archive and extracted executable SHA-256 values, checks that the binary reports `1.18.31`, and copies it into `vendor/opencode`.
+Loop 还会记录 terminal 状态，用来区分真正完成、被阻塞、达到预算或被用户中止。
 
-Pinned backend provenance:
+## Runner
+
+Runner 用于展示执行过程中的可观察信息，例如：
+
+- OpenCode 启动状态
+- 等待模型
+- Analyzing…
+- tool pending / running / completed / error
+- tool 输入输出摘要
+- tool duration
+- token 使用
+- retry
+- compaction
+- cancellation
+- backend error
+
+Runner 不展示模型的私有 chain-of-thought。
+
+## OpenCode backend
+
+Codey 不依赖机器上安装的 OpenCode。
+
+开发环境使用：
 
 ```text
-OpenCode base: 1.18.31
-Fork: StupidArthur/opencode-fork
-Source commit: cf50cd4e9294aaf260e0742ffffefca9181fd64d
-Patch lineage:
-  93dbf6f64cbf6402549289cf2eb56ee4c2474c57  ShellTool / cross-spawn inherited-stdio fix
-  cf50cd4e9294aaf260e0742ffffefca9181fd64d  public /session/:id/shell inherited-stdio fix
-Binary SHA-256:
-  03CA853EAAE717FA45A5E8BC180707F865E82F7DF6089816EBAA6988B67D259A
+vendor/opencode/opencode.exe
 ```
 
-The patched build remains protocol- and version-compatible with OpenCode `1.18.31`; Codey does not use a system-installed OpenCode binary.
-
-The Windows installer bundles that binary under:
+打包后的程序使用：
 
 ```text
 resources/opencode/opencode.exe
 ```
 
-The application checks `/global/health` at runtime and rejects a backend whose reported version is not `1.18.31`.
+如果对应文件不存在，Codey 会直接报错，不会回退到系统 PATH。
 
-## Runtime isolation and permissions
-
-Each app runtime launches a local authenticated `opencode serve` process bound to `127.0.0.1`. OpenCode data/config/cache are isolated under Codey's Electron `userData` directory.
-
-Requests are routed to the selected Workspace with OpenCode's public `x-opencode-directory` mechanism.
-
-Codey creates private, randomized OpenCode primary-agent names for Plan and Build so project-level `agent.build` / `agent.plan` configuration cannot redefine Codey's execution agents. The Session permission preset is also re-applied through `OPENCODE_PERMISSION` after normal OpenCode config loading.
-
-OpenCode permissions are an agent/tool permission system, **not an OS-level filesystem sandbox**. In particular, `workspace-write` should not be interpreted as the same security boundary as DSH's ACL sandbox. `read-only` denies edit and shell execution; `danger-full-access` permits external-directory access.
-
-## Prewarming
-
-OpenCode startup is paid while the user is editing rather than after Submit:
-
-- Session open schedules a delayed warmup.
-- The first draft save or mode change starts warmup immediately.
-- Submit reuses the same in-flight startup Promise if warmup has not completed.
-- Warmup failures are logged but do not block editing; Submit retries through the normal runtime path.
-
-## Development
-
-Requires Node 24 and pnpm 11.
+当前固定 backend：
 
 ```text
+OpenCode base: 1.18.31
+
+Fork:
+StupidArthur/opencode-fork
+
+Source commit:
+cf50cd4e9294aaf260e0742ffffefca9181fd64d
+
+Patch lineage:
+93dbf6f64cbf6402549289cf2eb56ee4c2474c57
+  ShellTool / cross-spawn inherited-stdio fix
+
+cf50cd4e9294aaf260e0742ffffefca9181fd64d
+  POST /session/:id/shell inherited-stdio fix
+
+opencode.exe SHA-256:
+03CA853EAAE717FA45A5E8BC180707F865E82F7DF6089816EBAA6988B67D259A
+```
+
+Windows 下 inherited-stdio shell hang 已经同时覆盖：
+
+- agent ShellTool
+- public `/session/:id/shell`
+
+并有 CI regression probe。
+
+## 权限
+
+Codey 当前提供三种权限预设：
+
+### Read-only
+
+- 禁止 edit
+- 禁止 bash
+- 禁止 external directory
+
+适合只读分析。
+
+### Workspace-write
+
+- 允许 edit
+- 允许 bash
+- 禁止 external directory
+
+适合正常项目开发。
+
+### Danger full access
+
+- 允许外部目录访问
+- 允许更完整的工具能力
+
+需要注意：
+
+> OpenCode permission 是 agent / tool authorization，不是操作系统级 ACL sandbox。
+
+因此 `workspace-write` 不应被理解为和系统级文件隔离完全等价。
+
+## Runtime 隔离
+
+Codey 每个运行时会：
+
+- 启动自己的 `opencode serve`
+- 绑定 `127.0.0.1`
+- 使用随机 Basic Auth 密码
+- 使用当前 Workspace 路由
+- 把 OpenCode data / config / cache 放到 Codey 自己的 userData 下
+- 禁止 OpenCode 自动更新
+
+项目中的普通 `opencode.json` 不能替换 Codey 私有 Plan / Build agent，也不能放宽 Codey 最终施加的权限预设。
+
+## Prewarm
+
+为了减少点击 Submit 后的等待，Codey 会提前启动 OpenCode：
+
+- 打开 Session 后延迟预热
+- 第一次编辑 draft 时立即预热
+- 切换模式时可触发预热
+- Submit 复用同一个启动 Promise
+
+在已经预热的情况下，Submit 到真正模型请求之间的 Codey 启动开销很小。
+
+## 开发环境
+
+要求：
+
+```text
+Node 24
+pnpm 11
+Windows x64
+```
+
+安装依赖：
+
+```powershell
 pnpm install --frozen-lockfile
+```
+
+类型检查和构建：
+
+```powershell
 pnpm typecheck
 pnpm build
-pnpm probe:opencode
 ```
 
-Prepare and smoke-test the pinned Windows backend:
+准备固定 OpenCode backend：
 
-```text
+```powershell
 pnpm prepare:opencode
-pnpm probe:opencode:smoke
 ```
 
-Build the Windows x64 installer:
+backend smoke test：
+
+```powershell
+pnpm probe:opencode
+pnpm probe:opencode:smoke
+pnpm probe:opencode:shell-hang
+```
+
+开发运行：
+
+```powershell
+pnpm dev
+```
+
+## 直接可用的 Windows 包
+
+当前个人使用场景不需要安装包，推荐直接生成解压即用的 Windows 目录：
+
+```powershell
+pnpm prepare:electron
+pnpm prepare:opencode
+pnpm build
+pnpm exec electron-builder --win --x64 --dir
+```
+
+输出：
 
 ```text
-pnpm dist:win
+release\win-unpacked\
 ```
 
-## Diagnostics
+直接运行其中的：
 
-Per-Session diagnostic logs are written by default to:
+```text
+Temporal Workspace OpenCode.exe
+```
+
+即可。
+
+如果需要在机器之间复制，可以直接把整个 `win-unpacked` 目录压成 zip：
+
+```powershell
+Compress-Archive -Path release\win-unpacked\* -DestinationPath release\Codey-win-x64.zip -Force
+```
+
+Codey 的 patched OpenCode 位于：
+
+```text
+release\win-unpacked\resources\opencode\opencode.exe
+```
+
+Windows CI 会检查最终打包目录中的 OpenCode 版本和 SHA-256。
+
+## 数据与日志
+
+Codey 产品数据默认放在 Electron userData：
+
+```text
+%APPDATA%\Temporal Workspace OpenCode
+```
+
+其中包括：
+
+- SQLite 产品数据库
+- 模型凭据
+- OpenCode runtime data / config / cache
+
+诊断日志默认写到：
 
 ```text
 D:\codey-log\session-<product-session-id>.jsonl
 ```
 
-Important OpenCode events include runtime startup, health/version checks, Session create/resume, prompt timing, SSE events, tool lifecycle, compaction, cancellation, evidence phases, and snapshot timing.
+日志包含：
 
-## Repository lineage
+- runtime startup
+- backend identity
+- Session create / resume
+- prompt timing
+- SSE events
+- tool lifecycle
+- cancellation
+- evidence
+- verification
+- snapshot timing
 
-This repository was split from `StupidArthur/codey` after the OpenCode backend reached a validated Windows baseline. Its `main` branch preserves the full Git history of the former `backend/opencode-v1.18.31` branch.
+## CI
 
-Related repositories:
+Windows CI 当前覆盖：
+
+- frozen dependency install
+- typecheck
+- build
+- static OpenCode contract probe
+- pinned backend 下载与 SHA 校验
+- server smoke
+- inherited-stdio regression
+- Electron runtime preparation
+- Windows unpacked packaging
+- 最终 bundled OpenCode version / SHA 校验
+
+## 仓库关系
 
 ```text
-StupidArthur/codey-opencode  → current OpenCode-backed Codey product line
-StupidArthur/opencode-fork   → pinned OpenCode 1.18.31 backend patches
-StupidArthur/codey           → earlier DSH lineage and historical development
+StupidArthur/codey-opencode
+→ 当前 Codey OpenCode 主线
+
+StupidArthur/opencode-fork
+→ Codey 使用的 OpenCode 1.18.31 patched backend
+
+StupidArthur/codey
+→ 早期 DSH 版本和历史开发 lineage
 ```
 
-Backend switching is intentionally not implemented at runtime. Codey treats the execution core as an edition-level architectural choice rather than a per-session toggle.
+当前仓库的 `main` 保留了原 `StupidArthur/codey` 中 OpenCode 分支的完整 Git 历史。
+
+后续开发和 issue 管理都应以本仓库为准。
