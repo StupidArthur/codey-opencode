@@ -213,7 +213,12 @@ function App(): React.JSX.Element {
   const [cancelling, setCancelling] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [sidebarWidth, setSidebarWidth] = useState(() => Number(window.localStorage.getItem('codey.sidebarWidth')) || 196)
-  const [specWidth, setSpecWidth] = useState(() => Number(window.localStorage.getItem('codey.specWidth')) || 390)
+  const [specWidth, setSpecWidth] = useState(() => {
+    const saved = Number(window.localStorage.getItem('codey.specWidth'))
+    // Migrate the previous 390px default to the roomier Spec layout. Preserve
+    // any deliberate custom width the user already chose.
+    return saved && saved !== 390 ? saved : 480
+  })
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [settings, setSettings] = useState<ModelSettings | null>(null)
   const [permission, setPermission] = useState<PermissionPreset>('workspace-write')
@@ -598,7 +603,7 @@ function App(): React.JSX.Element {
             {runnerHasNewEvents && <button className="runner-new-events" onClick={jumpRunnerToLatest}>↓ 有新事件 · 回到底部</button>}
           </section>
         </section>
-        <div className="pane-resizer pane-resizer-spec" role="separator" aria-orientation="vertical" aria-label="调整 Spec 面板宽度" onPointerDown={event => beginPaneResize('spec', event)} onDoubleClick={() => setSpecWidth(390)} />
+        <div className="pane-resizer pane-resizer-spec" role="separator" aria-orientation="vertical" aria-label="调整 Spec 面板宽度" onPointerDown={event => beginPaneResize('spec', event)} onDoubleClick={() => setSpecWidth(480)} />
         <section className="spec-pane" aria-label="Spec 编辑器">
           <div className={`spec-context ${snapshot.running ? 'next-spec' : ''}`}>
             <span className="eyebrow">{snapshot.running ? 'NEXT SPEC' : 'SPEC'}</span>
