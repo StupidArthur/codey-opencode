@@ -207,6 +207,7 @@ function loopStatusLabel(status: LoopTerminalSummary['status']): string {
     case 'blocked': return '阻塞'
     case 'budget_exhausted': return '预算耗尽'
     case 'failed': return '失败'
+    case 'interrupted': return '中断'
   }
 }
 

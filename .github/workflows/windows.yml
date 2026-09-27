@@ -41,6 +41,12 @@ jobs:
       - name: Build
         run: pnpm build
 
+      - name: Temporal state regression
+        shell: pwsh
+        run: |
+          $env:ELECTRON_RUN_AS_NODE = "1"
+          pnpm exec electron scripts/probes/temporal-state-regression.mjs
+
       - name: Static OpenCode contract probe
         run: pnpm probe:opencode
 

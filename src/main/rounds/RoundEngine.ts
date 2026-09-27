@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto'
-import type { EvidenceSummary, ExecutionOutcome, LoopTerminalSummary, RoundMode, RoundStatus, RoundSummary, RunnerEvent, SessionSummary } from '../../shared/contracts'
+import type { EvidenceSummary, ExecutionOutcome, LoopTerminalSummary, RoundMode, RoundStatus, RoundSummary, RunOutcome, RunnerEvent, SessionSummary } from '../../shared/contracts'
 import type { AgentRuntime } from '../runtime/AgentRuntime'
 import { TURN_CANCELLED_MESSAGE } from '../runtime/AgentRuntime'
 import type { EvidenceCollector } from '../evidence/EvidenceCollector'
-import type { EvidenceBundle, VerificationExecutorFn, VerificationRun } from '../evidence/evidence'
+import type { EvidenceBundle, VerificationExecutorFn, VerificationRun, WorkspaceSnapshot as EvidenceWorkspaceSnapshot } from '../evidence/evidence'
 import { LoopController } from '../loop/LoopController'
 import type { ProductStore } from '../persistence/ProductStore'
 import { planGuidance } from '../plan/PlanGuidance'
@@ -39,7 +39,7 @@ export interface SubmitInput {
 export class RoundEngine {
   constructor(private readonly deps: RoundEngineDeps) {}
 
-  async submit(input: SubmitInput): Promise<{ roundId: string; outcome: ExecutionOutcome }> {
+  async submit(input: SubmitInput): Promise<{ roundId: string; outcome: RunOutcome }> {
     const { store } = this.deps
     const rounds = store.listRounds(input.session.id)
     const open = rounds.at(-1)
@@ -54,7 +54,7 @@ export class RoundEngine {
     return this.submitDirect(input, round, input.mode)
   }
 
-  private async submitDirect(input: SubmitInput, round: RoundSummary, mode: 'plan' | 'vibe'): Promise<{ roundId: string; outcome: ExecutionOutcome }> {
+  private async submitDirect(input: SubmitInput, round: RoundSummary, mode: 'plan' | 'vibe'): Promise<{ roundId: string; outcome: RunOutcome }> {
     const { store } = this.deps
     store.markRoundExecutionStarted(input.session.id, round.id)
     try {
@@ -64,6 +64,7 @@ export class RoundEngine {
       const baselineStartedAt = Date.now()
       this.deps.onDiagnostic?.('evidence.baseline.start', { mode, roundId: round.id })
       const baseline = await this.deps.evidence.baseline(input.session.workspacePath)
+      if (mode === 'vibe') store.saveRoundBaseline(round.id, serializeEvidenceSnapshot(baseline))
       this.deps.onDiagnostic?.('evidence.baseline.end', { mode, roundId: round.id, durationMs: Date.now() - baselineStartedAt })
       throwIfCancelled(this.deps.isCancellationRequested)
       // Plan turns carry product-owned guidance on the SAME OpenCode session; the
@@ -110,6 +111,24 @@ export class RoundEngine {
         await this.deps.onRoundChanged?.()
         return { roundId: round.id, outcome: 'interrupted' }
       }
+      if (mode === 'vibe') {
+        const failure = messageOf(error)
+        store.appendVibeEntry(round.id, {
+          id: randomUUID(),
+          specMarkdown: input.spec,
+          assistantOutput: failure ? `执行失败：${failure}` : '执行失败。',
+          executionOutcome: 'failed',
+          createdAt: new Date().toISOString()
+        })
+        round.bodyMarkdown = failure ? `执行失败：${failure}` : '执行失败。'
+        round.updatedAt = new Date().toISOString()
+        store.saveRound(input.session.id, round)
+        // A failed Vibe request is a failed turn, not a terminal Round.
+        // The user can retry or continue the same phase after the runtime is restarted.
+        try { store.markRoundExecutionFinished(input.session.id, round.id, 'active') } catch { /* already inactive */ }
+        await this.deps.onRoundChanged?.()
+        throw error
+      }
       this.terminate(input.session, round, 'failed')
       await this.deps.onRoundChanged?.()
       throw error
@@ -121,14 +140,102 @@ export class RoundEngine {
     if (open?.status === 'active') await this.finalize(session, open)
   }
 
-  private async submitLoop(input: SubmitInput): Promise<{ roundId: string; outcome: ExecutionOutcome }> {
+  /** Reconcile executions that died with the app. The store owns the
+   *  runtime_active crash marker; the engine reconstructs the historical
+   *  document so every terminal Round still has a Result. */
+  async reconcileInterrupted(session: SessionSummary): Promise<void> {
+    const { store } = this.deps
+    if (store.reconcileInterruptedRounds(session.id) === 0) return
+
+    for (const round of store.listRounds(session.id)) {
+      if (round.status !== 'interrupted' || store.getResult(round.id)) continue
+      let evidence = bundleFromRecords(store.listEvidence(round.id), 'interrupted')
+      const savedBaseline = store.getRoundBaseline(round.id)
+      if (savedBaseline) {
+        try {
+          const baseline = deserializeEvidenceSnapshot(savedBaseline)
+          const projected = await this.deps.evidence.collect(
+            session.workspacePath, baseline, baseline, [], [], 'interrupted'
+          )
+          projected.bundle.verification = evidence.verification
+          evidence = projected.bundle
+          store.deleteEvidenceKind(round.id, 'workspace')
+          for (const record of this.deps.evidence.toRecords(evidence)) {
+            if (record.kind === 'workspace') store.saveEvidence(round.id, record)
+          }
+        } catch {
+          // Persisted evidence remains the fallback when workspace projection
+          // cannot be reconstructed after a crash.
+        }
+      }
+
+      if (round.mode === 'vibe') {
+        const entries = store.listVibeEntries(round.id)
+        const last = entries.at(-1)
+        store.saveResult(round.id, this.deps.resultBuilder.build({
+          finalResponse: last?.assistantOutput ?? round.bodyMarkdown,
+          evidence,
+          outcome: 'interrupted',
+          round: {
+            mode: 'vibe',
+            turns: entries.map((entry) => ({
+              spec: entry.specMarkdown,
+              outcome: entry.executionOutcome,
+              output: entry.assistantOutput
+            }))
+          }
+        }))
+        continue
+      }
+
+      if (round.mode === 'plan') {
+        const versions = store.listPlanVersions(round.id)
+        store.saveResult(round.id, this.deps.resultBuilder.build({
+          finalResponse: versions.at(-1)?.planMarkdown ?? round.bodyMarkdown,
+          evidence,
+          outcome: 'interrupted',
+          round: {
+            mode: 'plan',
+            turns: versions.map((version) => ({
+              spec: version.submittedSpec,
+              outcome: 'completed' as const,
+              output: version.planMarkdown
+            }))
+          }
+        }))
+        continue
+      }
+
+      store.saveResult(round.id, this.deps.resultBuilder.build({
+        finalResponse: round.bodyMarkdown,
+        evidence,
+        outcome: 'interrupted',
+        loopTerminal: {
+          status: 'interrupted',
+          reason: '应用在 Loop 执行期间退出；已按重启时可观察到的 Workspace 状态恢复结果。'
+        },
+        round: {
+          mode: 'loop',
+          turns: [{ spec: round.title, outcome: 'interrupted', output: round.bodyMarkdown }]
+        }
+      }))
+    }
+  }
+
+  private async submitLoop(input: SubmitInput): Promise<{ roundId: string; outcome: RunOutcome }> {
     const { store } = this.deps
     const round = this.createRound(input.session, 'loop', input.spec)
     store.markRoundExecutionStarted(input.session.id, round.id)
+    let runtime: AgentRuntime | undefined
+    let cancellationBaseline: EvidenceWorkspaceSnapshot | undefined
     try {
       throwIfCancelled(this.deps.isCancellationRequested)
-      const runtime = await this.deps.ensureRuntime('loop')
+      runtime = await this.deps.ensureRuntime('loop')
       throwIfCancelled(this.deps.isCancellationRequested)
+      // Keep a product-owned round baseline so an interrupted Loop can still
+      // project truthful workspace changes into a terminal Result.
+      cancellationBaseline = await this.deps.evidence.baseline(input.session.workspacePath)
+      store.saveRoundBaseline(round.id, serializeEvidenceSnapshot(cancellationBaseline))
       const loop = new LoopController(runtime, this.deps.evidence, undefined, Date.now, this.deps.verify)
       const result = await loop.run({
         rootSpec: input.spec,
@@ -138,28 +245,66 @@ export class RoundEngine {
         isCancelled: this.deps.isCancellationRequested
       })
       this.saveEvidence(round.id, result.evidence)
+      const executionOutcome = toExecutionOutcome(result.terminal.status)
       const document = this.deps.resultBuilder.build({
         finalResponse: result.finalResponse,
         evidence: result.evidence,
-        outcome: result.terminal.status === 'completed' ? 'completed' : 'failed',
+        outcome: executionOutcome,
         loopTerminal: result.terminal,
         decision: result.decision,
         round: {
           mode: 'loop',
           turns: [{
             spec: input.spec,
-            outcome: result.terminal.status === 'completed' ? 'completed' : result.terminal.status === 'blocked' ? 'blocked' : 'failed',
+            outcome: executionOutcome,
             output: result.finalResponse
           }]
         }
       })
-      store.saveResult(round.id, document)
-      this.terminate(input.session, round, toRoundStatus(result.terminal.status), result.finalResponse)
+      round.status = toRoundStatus(result.terminal.status)
+      round.bodyMarkdown = result.finalResponse
+      round.updatedAt = new Date().toISOString()
+      store.commitRoundTerminal(input.session.id, round, document)
       await this.deps.onRoundChanged?.()
-      return { roundId: round.id, outcome: result.terminal.status === 'completed' ? 'completed' : 'failed' }
+      return { roundId: round.id, outcome: result.terminal.status }
     } catch (error) {
       if (isCancelled(error, this.deps.isCancellationRequested)) {
-        this.terminate(input.session, round, 'interrupted')
+        let evidence = bundleFromRecords(store.listEvidence(round.id), 'interrupted')
+        if (cancellationBaseline) {
+          try {
+            const toolFacts = (runtime?.takeToolFacts?.() ?? []).map((fact) => ({ ...fact, turn: 1 }))
+            const collected = await this.deps.evidence.collect(
+              input.session.workspacePath,
+              cancellationBaseline,
+              cancellationBaseline,
+              this.deps.takeEvents(),
+              toolFacts,
+              'interrupted'
+            )
+            evidence = collected.bundle
+            this.saveEvidence(round.id, evidence)
+          } catch {
+            // Cancellation Result must still be saved even if the final
+            // workspace observation itself fails.
+          }
+        }
+        const terminal: LoopTerminalSummary = {
+          status: 'interrupted',
+          reason: '用户中止了当前 Loop；已保留中止时能够观察到的工作区结果。'
+        }
+        const document = this.deps.resultBuilder.build({
+          finalResponse: '',
+          evidence,
+          outcome: 'interrupted',
+          loopTerminal: terminal,
+          round: {
+            mode: 'loop',
+            turns: [{ spec: input.spec, outcome: 'interrupted', output: '' }]
+          }
+        })
+        round.status = 'interrupted'
+        round.updatedAt = new Date().toISOString()
+        store.commitRoundTerminal(input.session.id, round, document)
         await this.deps.onRoundChanged?.()
         return { roundId: round.id, outcome: 'interrupted' }
       }
@@ -169,15 +314,43 @@ export class RoundEngine {
     }
   }
 
-  /** Finalize an open Plan/Vibe Round; Vibe gets a top-level Result document
-   *  built from the WHOLE conversation of the round, not the last reply. */
+  /** Finalize an open Plan/Vibe Round. The terminal page is committed
+   *  atomically, and Vibe Changes are re-projected from the Round baseline so
+   *  edit-then-revert activity does not masquerade as a final workspace delta. */
   private async finalize(session: SessionSummary, round: RoundSummary): Promise<void> {
     const { store } = this.deps
+    let document: ReturnType<ResultBuilder['build']> | undefined
+
     if (round.mode === 'vibe') {
       const entries = store.listVibeEntries(round.id)
       const last = entries.at(-1)
-      const evidence = bundleFromRecords(store.listEvidence(round.id))
-      const document = this.deps.resultBuilder.build({
+      let evidence = bundleFromRecords(store.listEvidence(round.id), last?.executionOutcome ?? 'completed')
+      const savedBaseline = store.getRoundBaseline(round.id)
+      if (savedBaseline) {
+        try {
+          const baseline = deserializeEvidenceSnapshot(savedBaseline)
+          const projected = await this.deps.evidence.collect(
+            session.workspacePath,
+            baseline,
+            baseline,
+            [],
+            [],
+            last?.executionOutcome ?? 'completed'
+          )
+          // Verification history remains factual across the Round; workspace
+          // observations are replaced by the final baseline→current projection.
+          projected.bundle.verification = evidence.verification
+          evidence = projected.bundle
+          store.deleteEvidenceKind(round.id, 'workspace')
+          for (const record of this.deps.evidence.toRecords(evidence)) {
+            if (record.kind === 'workspace') store.saveEvidence(round.id, record)
+          }
+        } catch {
+          // Older or corrupt baselines fall back to the persisted evidence
+          // projection rather than preventing the Round from closing.
+        }
+      }
+      document = this.deps.resultBuilder.build({
         finalResponse: last?.assistantOutput ?? '',
         evidence,
         outcome: last?.executionOutcome ?? 'completed',
@@ -186,13 +359,11 @@ export class RoundEngine {
           turns: entries.map((entry) => ({ spec: entry.specMarkdown, outcome: entry.executionOutcome, output: entry.assistantOutput }))
         }
       })
-      store.saveResult(round.id, document)
     } else if (round.mode === 'plan') {
-      // A Plan round also records what the phase produced: every version.
       const versions = store.listPlanVersions(round.id)
       if (versions.length > 0) {
         const evidence = bundleFromRecords(store.listEvidence(round.id))
-        const document = this.deps.resultBuilder.build({
+        document = this.deps.resultBuilder.build({
           finalResponse: versions.at(-1)?.planMarkdown ?? '',
           evidence,
           outcome: 'completed',
@@ -201,12 +372,12 @@ export class RoundEngine {
             turns: versions.map((version) => ({ spec: version.submittedSpec, outcome: 'completed' as const, output: version.planMarkdown }))
           }
         })
-        store.saveResult(round.id, document)
       }
     }
+
     round.status = 'completed'
     round.updatedAt = new Date().toISOString()
-    store.saveRound(session.id, round)
+    store.commitRoundTerminal(session.id, round, document)
     await this.deps.onRoundChanged?.()
   }
 
@@ -249,7 +420,34 @@ export class RoundEngine {
   }
 }
 
-function bundleFromRecords(records: EvidenceSummary[]): EvidenceBundle {
+function serializeEvidenceSnapshot(snapshot: EvidenceWorkspaceSnapshot): string {
+  return JSON.stringify({
+    git: snapshot.git,
+    preexisting: [...snapshot.preexisting],
+    files: [...snapshot.files.entries()],
+    dirty: [...snapshot.dirty.entries()],
+    fileStates: [...snapshot.fileStates.entries()]
+  })
+}
+
+function deserializeEvidenceSnapshot(raw: string): EvidenceWorkspaceSnapshot {
+  const parsed = JSON.parse(raw) as {
+    git: boolean
+    preexisting: string[]
+    files: Array<[string, { mtimeMs: number; size: number; hash?: string }]>
+    dirty: Array<[string, string]>
+    fileStates: Array<[string, { exists: boolean; mtimeMs: number; size: number; hash?: string }]>
+  }
+  return {
+    git: parsed.git,
+    preexisting: new Set(parsed.preexisting),
+    files: new Map(parsed.files),
+    dirty: new Map(parsed.dirty),
+    fileStates: new Map(parsed.fileStates)
+  }
+}
+
+function bundleFromRecords(records: EvidenceSummary[], outcome: ExecutionOutcome = 'completed'): EvidenceBundle {
   const changedFiles: string[] = []
   const newFiles: string[] = []
   const deletedFiles: string[] = []
@@ -286,12 +484,16 @@ function bundleFromRecords(records: EvidenceSummary[]): EvidenceBundle {
     newFiles: [...new Set(newFiles)],
     deletedFiles: [...new Set(deletedFiles)],
     preexistingChanges: [],
-    ...(gitDiffSummary ? { gitDiffSummary } : {}), toolFacts: [], verification, outcome: 'completed'
+    ...(gitDiffSummary ? { gitDiffSummary } : {}), toolFacts: [], verification, outcome
   }
 }
 
 function toRoundStatus(status: LoopTerminalSummary['status']): RoundStatus {
   return status
+}
+
+function toExecutionOutcome(status: LoopTerminalSummary['status']): ExecutionOutcome {
+  return status === 'budget_exhausted' ? 'failed' : status
 }
 
 function titleFor(spec: string, mode: RoundMode): string {
@@ -305,4 +507,9 @@ function throwIfCancelled(probe?: () => boolean): void {
 
 function isCancelled(error: unknown, probe?: () => boolean): boolean {
   return probe?.() === true || (error instanceof Error && error.message === TURN_CANCELLED_MESSAGE)
+}
+
+
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }

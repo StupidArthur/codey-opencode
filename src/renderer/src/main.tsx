@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { EditorView, basicSetup } from 'codemirror'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import type { EvidenceSummary, ModelSettings, PermissionPreset, ResultSummary, RoundDetail, RoundMode, RunnerEvent, SessionSummary, WorkspaceSnapshot } from '../../shared/contracts'
+import type { EvidenceSummary, ModelSettings, PermissionPreset, ResultSummary, RoundDetail, RoundMode, RunOutcome, RunnerEvent, SessionSummary, WorkspaceSnapshot } from '../../shared/contracts'
 import './styles.css'
 
 const modeLabels: Record<RoundMode, string> = { plan: 'Plan', vibe: 'Vibe', loop: 'Loop' }
@@ -26,8 +26,8 @@ const evidenceKindLabels: Record<EvidenceSummary['kind'], string> = {
 const evidenceOutcomeLabels: Record<EvidenceSummary['outcome'], string> = {
   passed: '通过', failed: '失败', observed: '已观察'
 }
-const runOutcomeLabels: Record<'completed' | 'failed' | 'blocked' | 'interrupted', string> = {
-  completed: '完成', failed: '失败', blocked: '阻塞', interrupted: '中断'
+const runOutcomeLabels: Record<RunOutcome, string> = {
+  completed: '完成', failed: '失败', blocked: '阻塞', budget_exhausted: '预算耗尽', interrupted: '中断'
 }
 
 function ResultView({ result }: { result: ResultSummary }): React.JSX.Element {
@@ -167,19 +167,23 @@ function CodeMirrorEditor({ value, onChange, onFocus, onBlur }: {
 
 function findActiveRunnerToolId(events: RunnerEvent[], running: boolean): string | null {
   if (!running) return null
+  const terminal = new Set<string>()
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index]
-    if (event.kind === 'error' && event.message.includes(' · failed · ')) return null
-    if (event.kind !== 'tool') continue
-    if (event.message.includes(' · completed · ') || event.message.includes(' · failed · ')) return null
-    return event.id
+    const tool = event.tool
+    if (!tool) continue
+    if (tool.status === 'completed' || tool.status === 'failed') {
+      terminal.add(tool.callId)
+      continue
+    }
+    if (tool.status === 'running' && !terminal.has(tool.callId)) return event.id
   }
   return null
 }
 
 function renderRunnerMessage(event: RunnerEvent, activeToolId: string | null, now: number): string {
   if (event.id !== activeToolId) return event.message
-  const elapsedMs = Math.max(0, now - new Date(event.at).getTime())
+  const elapsedMs = Math.max(0, now - new Date(event.tool?.startedAt ?? event.at).getTime())
   const newline = event.message.indexOf('\n')
   const elapsed = formatRunnerDuration(elapsedMs)
   return newline < 0
@@ -208,6 +212,7 @@ function App(): React.JSX.Element {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [sourceView, setSourceView] = useState(true)
   const [runnerOpen, setRunnerOpen] = useState(false)
+  const [runnerEvents, setRunnerEvents] = useState<RunnerEvent[]>([])
   const [runnerNow, setRunnerNow] = useState(() => Date.now())
   const [runnerHasNewEvents, setRunnerHasNewEvents] = useState(false)
   const [cancelling, setCancelling] = useState(false)
@@ -241,6 +246,20 @@ function App(): React.JSX.Element {
     const sessionChanged = previous?.session?.id !== next.session?.id
     snapshotRef.current = next
     setSnapshot(next)
+    const startingNewRun = next.running && !previous?.running
+    if (sessionChanged || startingNewRun) {
+      setRunnerEvents(next.runnerEvents)
+    } else {
+      // Snapshot and Runner IPC share one renderer but are produced by
+      // different projections. Merge by id so an in-flight snapshot cannot
+      // erase an event that arrived while the snapshot was being built.
+      setRunnerEvents(current => {
+        const merged = new Map<string, RunnerEvent>()
+        for (const event of next.runnerEvents) merged.set(event.id, event)
+        for (const event of current) merged.set(event.id, event)
+        return [...merged.values()].slice(-200)
+      })
+    }
     if (sessionChanged) localDraftDirty.current = false
     if (sessionChanged || (!editorFocused.current && !localDraftDirty.current)) {
       setDraft(next.draft)
@@ -256,7 +275,7 @@ function App(): React.JSX.Element {
       selectedIdRef.current = id
       setSelectedId(id)
     }
-    if (next.running && !previous?.running) {
+    if (next.running && !previous?.running && !selectionPinned.current) {
       runnerFollowLatest.current = true
       setRunnerHasNewEvents(false)
       setRunnerOpen(true)
@@ -271,12 +290,16 @@ function App(): React.JSX.Element {
   useEffect(() => {
     let active = true
     const unsubscribe = window.temporal.onSnapshot(next => { if (active) applySnapshot(next) })
+    const unsubscribeRunner = window.temporal.onRunnerEvent(event => {
+      if (!active) return
+      setRunnerEvents(previous => [...previous, event].slice(-200))
+    })
     window.temporal.getSnapshot().then(next => {
       if (!active) return
       applySnapshot(next)
       setWorkspacePath(next.workspacePath)
     }).catch(e => { if (active) setError(messageOf(e)) }).finally(() => { if (active) setLoading(false) })
-    return () => { active = false; unsubscribe() }
+    return () => { active = false; unsubscribe(); unsubscribeRunner() }
   }, [])
 
   useEffect(() => {
@@ -410,12 +433,11 @@ function App(): React.JSX.Element {
 
   const activeRound = snapshot?.rounds.find(round => round.status === 'active') ?? null
   const latestRound = snapshot?.rounds.at(-1) ?? null
-  const currentRound = activeRound ?? latestRound
+  const navigationRound = activeRound ?? latestRound
   const selectedRound = snapshot?.rounds.find(round => round.id === selectedId)
-  const viewingHistoricalRound = Boolean(selectedRound && currentRound && selectedRound.id !== currentRound.id)
+  const viewingHistoricalRound = Boolean(selectedRound && navigationRound && selectedRound.id !== navigationRound.id)
   const continuesActiveRound = Boolean(activeRound && activeRound.mode === mode && !(snapshot?.running && activeRound.mode === 'loop'))
   const submitRoundSequence = continuesActiveRound ? activeRound!.sequence : (latestRound?.sequence ?? 0) + 1
-  const runnerEvents = snapshot?.runnerEvents ?? []
   const runnerMode = activeRound?.mode ?? latestRound?.mode ?? mode
   const runStartedAt = snapshot?.runState.startedAt ? new Date(snapshot.runState.startedAt).getTime() : null
   const runFinishedAt = snapshot?.runState.finishedAt ? new Date(snapshot.runState.finishedAt).getTime() : null
@@ -474,14 +496,14 @@ function App(): React.JSX.Element {
   function selectRound(id: string): void {
     // Clicking the current page means "follow current" again; explicitly
     // choosing any older page pins history until the user returns.
-    selectionPinned.current = id !== currentRound?.id
+    selectionPinned.current = id !== navigationRound?.id
     selectedIdRef.current = id
     setSelectedId(id)
   }
 
   function returnToCurrentRound(): void {
     selectionPinned.current = false
-    const id = currentRound?.id ?? null
+    const id = navigationRound?.id ?? null
     selectedIdRef.current = id
     setSelectedId(id)
   }
@@ -559,15 +581,15 @@ function App(): React.JSX.Element {
         <aside className="sidebar" aria-label="Session 时间线">
           <div className="sidebar-header"><button className="icon-button sidebar-toggle" onClick={() => setSidebarCollapsed(!sidebarCollapsed)} aria-label={sidebarCollapsed ? '展开侧栏' : '折叠侧栏'} title={sidebarCollapsed ? '展开侧栏' : '折叠侧栏'}><span className="sidebar-toggle-glyph" aria-hidden="true"><i/></span></button><div className="sidebar-name"><strong>{snapshot.session.title}</strong><small title={snapshot.workspacePath ?? ''}>{snapshot.workspacePath}</small></div></div>
           <nav className="timeline" aria-label="Round 列表">
-            {snapshot.rounds.map(round => <button key={round.id} className={`timeline-item ${selectedId === round.id ? 'selected' : ''} ${currentRound?.id === round.id ? 'current' : ''}`} onClick={() => selectRound(round.id)} title={`Round ${round.sequence} · ${modeLabels[round.mode]} · ${statusLabels[round.status]}`}>
+            {snapshot.rounds.map(round => <button key={round.id} className={`timeline-item ${selectedId === round.id ? 'selected' : ''} ${activeRound?.id === round.id ? 'current' : ''}`} onClick={() => selectRound(round.id)} title={`Round ${round.sequence} · ${modeLabels[round.mode]} · ${statusLabels[round.status]}`}>
               <span className="thumbnail-page" data-round={round.sequence}>
                 <span className="thumbnail-eyebrow">{modeLabels[round.mode]} · Round {round.sequence}</span>
                 <span className="thumbnail-title">{round.title || `Round ${round.sequence}`}</span>
                 <span className="thumbnail-lines" aria-hidden="true"><i/><i/><i/><i/></span>
-                {currentRound?.id === round.id && <span className="thumbnail-current">当前</span>}
+                {activeRound?.id === round.id && <span className="thumbnail-current">当前</span>}
                 <span className={`thumbnail-state state-${round.status}`}>{statusLabels[round.status]}</span>
               </span>
-              <span className="timeline-copy"><strong>{round.title || `Round ${round.sequence}`}</strong><small>{modeLabels[round.mode]}{currentRound?.id === round.id ? ' · 当前' : ''}</small></span>
+              <span className="timeline-copy"><strong>{round.title || `Round ${round.sequence}`}</strong><small>{modeLabels[round.mode]}{activeRound?.id === round.id ? ' · 当前' : ''}</small></span>
             </button>)}
           </nav>
           <button
@@ -589,7 +611,7 @@ function App(): React.JSX.Element {
         {!sidebarCollapsed && <div className="pane-resizer pane-resizer-sidebar" role="separator" aria-orientation="vertical" aria-label="调整 Round 侧栏宽度" onPointerDown={event => beginPaneResize('sidebar', event)} onDoubleClick={() => setSidebarWidth(196)} />}
         <section className="result-pane" aria-label="结果页面">
           <div className="result-scroll">
-            {viewingHistoricalRound && currentRound && <div className="history-banner"><div><span>正在查看历史</span><strong>Round {selectedRound?.sequence} · {selectedRound ? modeLabels[selectedRound.mode] : ''}</strong></div><button onClick={returnToCurrentRound}>返回当前 Round {currentRound.sequence} →</button></div>}
+            {viewingHistoricalRound && navigationRound && <div className="history-banner"><div><span>正在查看历史</span><strong>Round {selectedRound?.sequence} · {selectedRound ? modeLabels[selectedRound.mode] : ''}</strong></div><button onClick={returnToCurrentRound}>{activeRound ? '返回当前' : '返回最新'} Round {navigationRound.sequence} →</button></div>}
             {selectedRound ? <RoundView key={selectedRound.id} round={selectedRound} />
               : snapshot.historyState === 'backend-unavailable' ? <article className="document"><div className="document-header"><div className="eyebrow">OPENCODE SESSION READY</div><h1>OpenCode runtime ready</h1><p>OpenCode Session 已在后台预热完成，但尚未产生 Temporal Round。第一次提交会沿用该 OpenCode Session 并创建 Round 1。</p></div></article>
               : <div className="blank-state"><div className="blank-symbol">⌁</div><h2>暂无结果</h2><p>在右侧写下目标，选择模式并提交。</p></div>}
