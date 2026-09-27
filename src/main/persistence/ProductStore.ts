@@ -654,10 +654,14 @@ export class ProductStore {
       if (!round || round.mode !== 'loop' || round.status !== 'active' || round.loop_phase !== 'ready') {
         throw new Error('Loop Plan is not ready to start')
       }
-      const plan = this.stmt('SELECT readiness_json FROM plan_versions WHERE id = ? AND round_id = ?')
-        .get(planVersionId, roundId) as { readiness_json: string | null } | undefined
+      const plan = this.stmt(`
+        SELECT id, readiness_json FROM plan_versions
+        WHERE round_id = ? ORDER BY ordinal DESC LIMIT 1
+      `).get(roundId) as { id: string; readiness_json: string | null } | undefined
       const readiness = plan?.readiness_json ? JSON.parse(plan.readiness_json) as PlanReadinessSummary : undefined
-      if (!plan || readiness?.ready !== true) throw new Error('Only a ready Plan version can start Loop')
+      if (!plan || plan.id !== planVersionId || readiness?.ready !== true) {
+        throw new Error('Only the latest ready Plan version can start Loop')
+      }
       const changed = this.stmt(`
         UPDATE rounds SET loop_phase = 'running', approved_plan_version_id = ?, runtime_active = 1, updated_at = ?
         WHERE id = ? AND product_session_id = ? AND status = 'active' AND runtime_active = 0
