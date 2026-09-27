@@ -130,6 +130,26 @@ function engineFor(store, runtime, cancellation = () => false) {
   store.close()
 }
 
+// Loop cannot start until the product-owned Plan gate is ready.
+{
+  const root = await mkdtemp(join(tmpdir(), 'codey-loop-plan-gate-'))
+  const workspace = join(root, 'workspace')
+  await mkdir(workspace)
+  const store = new ProductStore(join(root, 'product.sqlite'))
+  const session = store.createSession(workspace, undefined, 'Loop plan gate')
+  const runtime = {
+    prompt: async () => ({ text: '# Goal\nDo the task.\n\n# Open Questions\nNeed user input.' })
+  }
+  const engine = engineFor(store, runtime)
+  await engine.submit({ session, mode: 'loop', spec: 'ambiguous autonomous task' })
+  const round = store.listRounds(session.id)[0]
+  let rejected = false
+  try { await engine.startLoop(session) } catch { rejected = true }
+  check('loop_incomplete_plan_stays_planning', round.loopPhase === 'planning')
+  check('loop_incomplete_plan_cannot_start', rejected)
+  store.close()
+}
+
 // Loop terminal outcome is preserved all the way to the Run-facing return value.
 {
   const root = await mkdtemp(join(tmpdir(), 'codey-loop-blocked-'))
