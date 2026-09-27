@@ -166,20 +166,29 @@ function engineFor(store, runtime, cancellation = () => false) {
   store.close()
 }
 
-// Chinese Plan headings are first-class input to the product-owned readiness gate.
+// Chinese Plan headings are first-class input to the product-owned readiness
+// gate, and a non-Chinese first reply is repaired before it is persisted.
 {
   const root = await mkdtemp(join(tmpdir(), 'codey-chinese-plan-'))
   const workspace = join(root, 'workspace')
   await mkdir(workspace)
   const store = new ProductStore(join(root, 'product.sqlite'))
   const session = store.createSession(workspace, undefined, 'Chinese plan')
-  const runtime = { prompt: async () => ({ text: readyPlan }) }
+  let planPrompts = 0
+  const englishPlan = '# Goal\nDo the requested work.\n\n# Scope\n- Requested change only.\n\n# Current State\nRepository inspected.\n\n# Implementation\n1. Change code.\n2. Verify code.\n\n# Affected Files\n- src/example.ts\n\n# Acceptance Criteria\n- Requested behavior exists.\n- Existing behavior remains.\n\n# Verification\n- `pnpm test`\n\n# Constraints\nNone\n\n# Open Questions\nNone'
+  const runtime = {
+    prompt: async () => {
+      planPrompts += 1
+      return { text: planPrompts === 1 ? englishPlan : readyPlan }
+    }
+  }
   const engine = engineFor(store, runtime)
   await engine.submit({ session, mode: 'loop', spec: '生成中文 Plan' })
   const round = store.listRounds(session.id)[0]
   const plan = store.listPlanVersions(round.id).at(-1)
   check('chinese_plan_reaches_ready', round.loopPhase === 'ready' && plan?.readiness?.ready === true)
   check('chinese_plan_readiness_labels_are_chinese', plan?.readiness?.checks[0]?.label === '目标')
+  check('non_chinese_plan_is_repaired_before_save', planPrompts === 2 && plan?.planMarkdown.startsWith('# 目标'))
   store.close()
 }
 
