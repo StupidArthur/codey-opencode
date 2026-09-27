@@ -142,7 +142,7 @@ function RoundView({ round, onStartLoop, busy, pendingPlanInput }: {
         <div className="vibe-view-toolbar">
           <h3>执行记录</h3>
           <div className="segmented" aria-label="VIBE 阅读方式">
-            <button className={vibeView === 'focused' ? 'active' : ''} onClick={() => setVibeView('focused')}>当前迭代</button>
+            <button className={vibeView === 'focused' ? 'active' : ''} onClick={() => { setVibeView('focused'); setVibeEntryIndex(Math.max(round.vibeEntries.length - 1, 0)) }}>当前迭代</button>
             <button className={vibeView === 'all' ? 'active' : ''} onClick={() => setVibeView('all')}>全部迭代</button>
           </div>
         </div>
@@ -197,17 +197,18 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-function CodeMirrorEditor({ value, onChange, onFocus, onBlur }: {
+function CodeMirrorEditor({ value, onChange, onFocus, onBlur, onSubmit }: {
   value: string
   onChange: (value: string) => void
   onFocus: () => void
   onBlur: () => void
+  onSubmit: () => void
 }): React.JSX.Element {
   const host = useRef<HTMLDivElement>(null)
   const view = useRef<EditorView | null>(null)
   const applyingExternalValue = useRef(false)
-  const callbacks = useRef({ onChange, onFocus, onBlur })
-  callbacks.current = { onChange, onFocus, onBlur }
+  const callbacks = useRef({ onChange, onFocus, onBlur, onSubmit })
+  callbacks.current = { onChange, onFocus, onBlur, onSubmit }
 
   useEffect(() => {
     if (!host.current) return
@@ -223,7 +224,13 @@ function CodeMirrorEditor({ value, onChange, onFocus, onBlur }: {
         }),
         EditorView.domEventHandlers({
           focus: () => callbacks.current.onFocus(),
-          blur: () => callbacks.current.onBlur()
+          blur: () => callbacks.current.onBlur(),
+          keydown: (event) => {
+            if (event.key !== 'Enter' || event.shiftKey || event.isComposing || event.keyCode === 229) return false
+            event.preventDefault()
+            callbacks.current.onSubmit()
+            return true
+          }
         })
       ]
     })
@@ -781,7 +788,7 @@ function App(): React.JSX.Element {
                       : '本次提交会创建新的 VIBE Round。'}</small>
           </div>
           <div className="spec-toolbar"><div className="segmented" aria-label="下一次提交模式">{(['vibe', 'loop'] as const).map(item => <button key={item} className={mode === item ? 'active' : ''} onClick={() => queueDraft(draft, item)} disabled={busy} aria-pressed={mode === item}>{modeLabels[item]}</button>)}</div><div className="segmented" aria-label="编辑器视图"><button className={sourceView ? 'active' : ''} onClick={() => setSourceView(true)} aria-pressed={sourceView}>Source</button><button className={!sourceView ? 'active' : ''} onClick={() => setSourceView(false)} aria-pressed={!sourceView}>MD</button></div></div>
-          <div className="spec-body"><div className={`editor-container ${sourceView ? '' : 'hidden'}`}><CodeMirrorEditor key={snapshot.session.id} value={draft} onFocus={() => { editorFocused.current = true }} onBlur={() => { editorFocused.current = false }} onChange={value => queueDraft(value, mode)}/>{!draft && <span className="editor-placeholder" aria-hidden="true">{loopPlanning ? <># SPEC Input<br/><br/>补充目标范围、实施细节、验收标准或验证方法…</> : mode === 'loop' ? <># SPEC Goal<br/><br/>描述目标；Codey 会先生成 Plan，再由你确认开始执行…</> : <># VIBE<br/><br/>描述希望完成的工作…</>}</span>}</div><div className={`spec-preview markdown-body ${sourceView ? 'hidden' : ''}`}>{draft.trim() ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{draft}</ReactMarkdown> : <p className="muted">Spec 预览会显示在这里。</p>}</div></div>
+          <div className="spec-body"><div className={`editor-container ${sourceView ? '' : 'hidden'}`}><CodeMirrorEditor key={snapshot.session.id} value={draft} onFocus={() => { editorFocused.current = true }} onBlur={() => { editorFocused.current = false }} onChange={value => queueDraft(value, mode)} onSubmit={() => void submit()}/>{!draft && <span className="editor-placeholder" aria-hidden="true">{loopPlanning ? <># SPEC Input<br/><br/>补充目标范围、实施细节、验收标准或验证方法…</> : mode === 'loop' ? <># SPEC Goal<br/><br/>描述目标；Codey 会先生成 Plan，再由你确认开始执行…</> : <># VIBE<br/><br/>描述希望完成的工作…</>}</span>}</div><div className={`spec-preview markdown-body ${sourceView ? 'hidden' : ''}`}>{draft.trim() ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{draft}</ReactMarkdown> : <p className="muted">Spec 预览会显示在这里。</p>}</div></div>
           <div className="spec-footer">
             {mode === 'loop'
               ? snapshot.running
