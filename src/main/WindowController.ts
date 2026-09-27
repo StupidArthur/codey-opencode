@@ -30,6 +30,8 @@ export class WindowController {
   private logger: SessionLogger | null = null
   private activeRunId: string | undefined
   private activeRunStartedAt: number | undefined
+  private lastRunFinishedAt: string | undefined
+  private lastRunOutcome: 'completed' | 'failed' | 'blocked' | 'interrupted' | undefined
   private runnerSnapshotTimer: ReturnType<typeof setTimeout> | undefined
   private runtimePrewarmTimer: ReturnType<typeof setTimeout> | undefined
   private readonly evidence = new EvidenceCollector()
@@ -119,6 +121,8 @@ export class WindowController {
       }
       this.runnerEvents = []
       this.pendingEvidenceEvents = []
+      this.lastRunFinishedAt = undefined
+      this.lastRunOutcome = undefined
       this.error = undefined
       const snapshot = await this.emitSnapshot()
       this.scheduleRuntimePrewarm(snapshot.mode, 'session.open', 800)
@@ -142,6 +146,16 @@ export class WindowController {
       draft: draft.draft,
       mode: draft.mode,
       running: this.running,
+      runState: this.running
+        ? {
+            status: this.cancelRequested ? 'stopping' : 'running',
+            ...(this.activeRunStartedAt !== undefined ? { startedAt: new Date(this.activeRunStartedAt).toISOString() } : {})
+          }
+        : {
+            status: 'idle',
+            ...(this.lastRunFinishedAt ? { finishedAt: this.lastRunFinishedAt } : {}),
+            ...(this.lastRunOutcome ? { outcome: this.lastRunOutcome } : {})
+          },
       runnerEvents: [...this.runnerEvents],
       settings,
       permission: this.session?.permission ?? 'workspace-write',
@@ -210,26 +224,34 @@ export class WindowController {
     })
     this.cancelRequested = false
     this.running = true
+    this.lastRunFinishedAt = undefined
+    this.lastRunOutcome = undefined
     this.error = undefined
     this.runnerEvents = []
     this.pendingEvidenceEvents = []
     await this.emitSnapshot()
 
+    let finalOutcome: 'completed' | 'failed' | 'blocked' | 'interrupted' | undefined
     try {
       const result = await this.engine.submit({ session, mode, spec })
+      finalOutcome = result.outcome
       this.log('submit.end', { mode, outcome: result.outcome, roundId: result.roundId, durationMs: Date.now() - submitStartedAt })
       if (result.outcome !== 'interrupted') this.store.clearDraftIfRevision(session.id, submittedRevision)
     } catch (error) {
       this.log('submit.error', { mode, durationMs: Date.now() - submitStartedAt, cancelled: this.cancelRequested, error: messageOf(error) })
       if (!this.cancelRequested) {
+        finalOutcome = 'failed'
         this.error = messageOf(error)
         await this.closeRuntime()
         throw error
       }
+      finalOutcome = 'interrupted'
       this.error = undefined
     } finally {
       this.log('submit.finalize', { mode, durationMs: Date.now() - submitStartedAt, cancelRequested: this.cancelRequested })
       this.running = false
+      this.lastRunFinishedAt = new Date().toISOString()
+      this.lastRunOutcome = finalOutcome ?? (this.cancelRequested ? 'interrupted' : 'failed')
       this.cancelRequested = false
       this.activeRunId = undefined
       this.activeRunStartedAt = undefined
