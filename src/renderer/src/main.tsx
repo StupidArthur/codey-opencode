@@ -459,7 +459,6 @@ function App(): React.JSX.Element {
     setBusy(true)
     setError('')
     setCancelling(false)
-    setRunnerOpen(true)
     try {
       await window.temporal.saveDraft(latest.current.draft, latest.current.mode)
       await window.temporal.submit(spec, latest.current.mode)
@@ -490,7 +489,6 @@ function App(): React.JSX.Element {
     setBusy(true)
     setError('')
     setCancelling(false)
-    setRunnerOpen(true)
     try {
       await window.temporal.startLoop(force)
       applySnapshot(await window.temporal.getSnapshot())
@@ -556,6 +554,9 @@ function App(): React.JSX.Element {
   const loopPlanning = Boolean(activeRound?.mode === 'loop' && (activeRound.loopPhase === 'planning' || activeRound.loopPhase === 'ready') && mode === 'loop')
   const submitRoundSequence = continuesActiveRound ? activeRound!.sequence : (latestRound?.sequence ?? 0) + 1
   const runnerMode = activeRound?.mode ?? latestRound?.mode ?? mode
+  const effectiveSidebarWidth = sidebarCollapsed ? 54 : sidebarWidth
+  const availablePaneWidth = Math.max(680, workspaceWidth - effectiveSidebarWidth)
+  const specWidth = Math.max(320, Math.min(Math.min(720, availablePaneWidth - 360), Math.round(availablePaneWidth * specPaneRatio)))
   const runStartedAt = snapshot?.runState.startedAt ? new Date(snapshot.runState.startedAt).getTime() : null
   const runFinishedAt = snapshot?.runState.finishedAt ? new Date(snapshot.runState.finishedAt).getTime() : null
   const runElapsed = runStartedAt !== null
@@ -570,6 +571,16 @@ function App(): React.JSX.Element {
         : '空闲'
   const runnerDuration = runElapsed
   const activeRunnerToolId = findActiveRunnerToolId(runnerEvents, snapshot?.running === true)
+
+  useEffect(() => {
+    const host = workspaceHost.current
+    if (!host) return
+    const update = (): void => setWorkspaceWidth(host.getBoundingClientRect().width)
+    update()
+    const observer = new ResizeObserver(update)
+    observer.observe(host)
+    return () => observer.disconnect()
+  }, [snapshot?.session?.id])
 
   useEffect(() => {
     if (snapshot?.runState.status === 'idle') return
@@ -630,21 +641,25 @@ function App(): React.JSX.Element {
     if (!host) return
     event.preventDefault()
     const bounds = host.getBoundingClientRect()
+    let pendingSpecRatio = specPaneRatio
     document.body.classList.add('resizing-panes')
     const onMove = (move: PointerEvent): void => {
       if (kind === 'sidebar') {
         const width = Math.max(150, Math.min(320, move.clientX - bounds.left))
         setSidebarWidth(Math.round(width))
       } else {
-        const available = Math.max(320, bounds.width - (sidebarCollapsed ? 54 : sidebarWidth) - 360)
-        const width = Math.max(320, Math.min(Math.min(720, available), bounds.right - move.clientX))
-        setSpecWidth(Math.round(width))
+        const paneSpace = Math.max(680, bounds.width - (sidebarCollapsed ? 54 : sidebarWidth))
+        const maxWidth = Math.max(320, Math.min(720, paneSpace - 360))
+        const width = Math.max(320, Math.min(maxWidth, bounds.right - move.clientX))
+        pendingSpecRatio = Math.max(0.25, Math.min(0.7, width / paneSpace))
+        setSpecPaneRatio(pendingSpecRatio)
       }
     }
     const onUp = (): void => {
       document.body.classList.remove('resizing-panes')
       window.removeEventListener('pointermove', onMove)
       window.removeEventListener('pointerup', onUp)
+      if (kind === 'spec') persistUiPreferences({ ...uiPreferencesRef.current, specPaneRatio: pendingSpecRatio })
     }
     window.addEventListener('pointermove', onMove)
     window.addEventListener('pointerup', onUp)
