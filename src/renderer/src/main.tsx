@@ -48,9 +48,13 @@ function EvidenceList({ evidence }: { evidence: EvidenceSummary[] }): React.JSX.
 function RoundView({ round }: { round: RoundDetail }): React.JSX.Element {
   const latestVersionIndex = Math.max(round.planVersions.length - 1, 0)
   const [versionIndex, setVersionIndex] = useState(latestVersionIndex)
-  // A new Plan version (Plan×N) jumps the view to the latest; manual tab
-  // selection still works until the next version arrives.
-  useEffect(() => { setVersionIndex(latestVersionIndex) }, [latestVersionIndex])
+  const versionPinned = useRef(false)
+  // When the user explicitly browses an older Plan version, keep that page
+  // stable. New versions surface as a "查看最新" affordance instead of
+  // moving history underneath the cursor.
+  useEffect(() => {
+    if (!versionPinned.current) setVersionIndex(latestVersionIndex)
+  }, [latestVersionIndex])
   const header = <div className="document-header">
     <div className="eyebrow">ROUND {round.sequence} · {modeLabels[round.mode]}</div>
     <h1>{round.title}</h1>
@@ -62,7 +66,8 @@ function RoundView({ round }: { round: RoundDetail }): React.JSX.Element {
     return <article className="document">
       {header}
       {round.planVersions.length > 1 && <div className="version-tabs" role="tablist" aria-label="Plan 版本">
-        {round.planVersions.map((item, index) => <button key={item.id} role="tab" aria-selected={index === versionIndex} className={index === versionIndex ? 'active' : ''} onClick={() => setVersionIndex(index)}>v{item.ordinal}</button>)}
+        {round.planVersions.map((item, index) => <button key={item.id} role="tab" aria-selected={index === versionIndex} className={index === versionIndex ? 'active' : ''} onClick={() => { versionPinned.current = true; setVersionIndex(index) }}>v{item.ordinal}</button>)}
+        {versionIndex !== latestVersionIndex && <button className="latest-version" onClick={() => { versionPinned.current = false; setVersionIndex(latestVersionIndex) }}>查看最新 v{round.planVersions[latestVersionIndex]?.ordinal}</button>}
       </div>}
       <div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{version?.planMarkdown || round.bodyMarkdown || '本轮尚无计划。'}</ReactMarkdown></div>
       {version && version.submittedSpec.trim() && version.submittedSpec.trim() !== (version.planMarkdown ?? '').trim() && <details className="submitted-spec"><summary>本次提交的 Spec</summary><div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{version.submittedSpec}</ReactMarkdown></div></details>}
@@ -187,8 +192,11 @@ function App(): React.JSX.Element {
   const [sourceView, setSourceView] = useState(true)
   const [runnerOpen, setRunnerOpen] = useState(false)
   const [runnerNow, setRunnerNow] = useState(() => Date.now())
+  const [runnerHasNewEvents, setRunnerHasNewEvents] = useState(false)
   const [cancelling, setCancelling] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [sidebarWidth, setSidebarWidth] = useState(() => Number(window.localStorage.getItem('codey.sidebarWidth')) || 196)
+  const [specWidth, setSpecWidth] = useState(() => Number(window.localStorage.getItem('codey.specWidth')) || 390)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [settings, setSettings] = useState<ModelSettings | null>(null)
   const [permission, setPermission] = useState<PermissionPreset>('workspace-write')
@@ -196,9 +204,13 @@ function App(): React.JSX.Element {
   const editorFocused = useRef(false)
   const localDraftDirty = useRef(false)
   const snapshotRef = useRef<WorkspaceSnapshot | null>(null)
+  const selectedIdRef = useRef<string | null>(null)
+  const selectionPinned = useRef(false)
+  const workspaceHost = useRef<HTMLElement>(null)
   const draftTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const runnerEventsHost = useRef<HTMLDivElement>(null)
   const runnerFollowLatest = useRef(true)
+  const previousRunnerEventCount = useRef(0)
   const latest = useRef({ draft, mode })
   latest.current = { draft, mode }
 
@@ -213,16 +225,23 @@ function App(): React.JSX.Element {
       setMode(next.mode)
     }
     if (sessionChanged) {
-      setSelectedId(next.rounds.at(-1)?.id ?? null)
-    } else if (previous && next.rounds.length > previous.rounds.length) {
-      setSelectedId(next.rounds.at(-1)?.id ?? null)
+      selectionPinned.current = false
+      const id = next.rounds.at(-1)?.id ?? null
+      selectedIdRef.current = id
+      setSelectedId(id)
+    } else if (previous && next.rounds.length > previous.rounds.length && !selectionPinned.current) {
+      const id = next.rounds.at(-1)?.id ?? null
+      selectedIdRef.current = id
+      setSelectedId(id)
     }
     if (next.running && !previous?.running) {
       runnerFollowLatest.current = true
+      setRunnerHasNewEvents(false)
       setRunnerOpen(true)
     }
     if (previous?.running && !next.running) {
-      setRunnerOpen(false)
+      // Keep the completed Runner visible so the final tool/verification/error
+      // events do not disappear at the moment they become most useful.
       setCancelling(false)
     }
   }
@@ -237,6 +256,14 @@ function App(): React.JSX.Element {
     }).catch(e => { if (active) setError(messageOf(e)) }).finally(() => { if (active) setLoading(false) })
     return () => { active = false; unsubscribe() }
   }, [])
+
+  useEffect(() => {
+    window.localStorage.setItem('codey.sidebarWidth', String(sidebarWidth))
+  }, [sidebarWidth])
+
+  useEffect(() => {
+    window.localStorage.setItem('codey.specWidth', String(specWidth))
+  }, [specWidth])
 
   useEffect(() => {
     if (!workspacePath || snapshot?.session) return
@@ -359,8 +386,18 @@ function App(): React.JSX.Element {
     finally { setBusy(false) }
   }
 
+  const activeRound = snapshot?.rounds.find(round => round.status === 'active') ?? null
+  const latestRound = snapshot?.rounds.at(-1) ?? null
+  const currentRound = activeRound ?? latestRound
   const selectedRound = snapshot?.rounds.find(round => round.id === selectedId)
+  const viewingHistoricalRound = Boolean(selectedRound && currentRound && selectedRound.id !== currentRound.id)
+  const continuesActiveRound = Boolean(activeRound && activeRound.mode === mode)
+  const submitRoundSequence = continuesActiveRound ? activeRound!.sequence : (latestRound?.sequence ?? 0) + 1
   const runnerEvents = snapshot?.runnerEvents ?? []
+  const runnerMode = activeRound?.mode ?? latestRound?.mode ?? mode
+  const runnerDuration = runnerEvents.length > 1
+    ? formatRunnerDuration(Math.max(0, new Date(runnerEvents.at(-1)!.at).getTime() - new Date(runnerEvents[0].at).getTime()))
+    : null
   const activeRunnerToolId = findActiveRunnerToolId(runnerEvents, snapshot?.running === true)
 
   useEffect(() => {
@@ -371,11 +408,18 @@ function App(): React.JSX.Element {
   }, [runnerOpen, snapshot?.running])
 
   useEffect(() => {
-    if (!runnerOpen || !runnerFollowLatest.current) return
+    const previousCount = previousRunnerEventCount.current
+    previousRunnerEventCount.current = runnerEvents.length
+    if (!runnerOpen) return
+    if (!runnerFollowLatest.current) {
+      if (runnerEvents.length > previousCount) setRunnerHasNewEvents(true)
+      return
+    }
     const host = runnerEventsHost.current
     if (!host) return
     const frame = requestAnimationFrame(() => {
       host.scrollTo({ top: host.scrollHeight, behavior: 'smooth' })
+      setRunnerHasNewEvents(false)
     })
     return () => cancelAnimationFrame(frame)
   }, [runnerEvents.length, runnerOpen])
@@ -385,6 +429,52 @@ function App(): React.JSX.Element {
     if (!host) return
     const distanceFromBottom = host.scrollHeight - host.scrollTop - host.clientHeight
     runnerFollowLatest.current = distanceFromBottom < 48
+    if (runnerFollowLatest.current) setRunnerHasNewEvents(false)
+  }
+
+  function jumpRunnerToLatest(): void {
+    runnerFollowLatest.current = true
+    setRunnerHasNewEvents(false)
+    const host = runnerEventsHost.current
+    if (host) host.scrollTo({ top: host.scrollHeight, behavior: 'smooth' })
+  }
+
+  function selectRound(id: string): void {
+    selectionPinned.current = true
+    selectedIdRef.current = id
+    setSelectedId(id)
+  }
+
+  function returnToCurrentRound(): void {
+    selectionPinned.current = false
+    const id = currentRound?.id ?? null
+    selectedIdRef.current = id
+    setSelectedId(id)
+  }
+
+  function beginPaneResize(kind: 'sidebar' | 'spec', event: React.PointerEvent<HTMLDivElement>): void {
+    const host = workspaceHost.current
+    if (!host) return
+    event.preventDefault()
+    const bounds = host.getBoundingClientRect()
+    document.body.classList.add('resizing-panes')
+    const onMove = (move: PointerEvent): void => {
+      if (kind === 'sidebar') {
+        const width = Math.max(150, Math.min(320, move.clientX - bounds.left))
+        setSidebarWidth(Math.round(width))
+      } else {
+        const available = Math.max(320, bounds.width - (sidebarCollapsed ? 54 : sidebarWidth) - 360)
+        const width = Math.max(320, Math.min(Math.min(720, available), bounds.right - move.clientX))
+        setSpecWidth(Math.round(width))
+      }
+    }
+    const onUp = (): void => {
+      document.body.classList.remove('resizing-panes')
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
   }
 
   return <div className="app-shell">
@@ -418,39 +508,54 @@ function App(): React.JSX.Element {
           {busy && <p className="muted loading-caption">正在读取 Session…</p>}
         </div>
       </main> :
-      <main className={`workspace ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
+      <main
+        ref={workspaceHost}
+        className={`workspace ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}
+        style={{ '--sidebar-width': `${sidebarWidth}px`, '--spec-width': `${specWidth}px` } as React.CSSProperties}
+      >
         <aside className="sidebar" aria-label="Session 时间线">
           <div className="sidebar-header"><button className="icon-button sidebar-toggle" onClick={() => setSidebarCollapsed(!sidebarCollapsed)} aria-label={sidebarCollapsed ? '展开侧栏' : '折叠侧栏'} title={sidebarCollapsed ? '展开侧栏' : '折叠侧栏'}><span className="sidebar-toggle-glyph" aria-hidden="true"><i/></span></button><div className="sidebar-name"><strong>{snapshot.session.title}</strong><small title={snapshot.workspacePath ?? ''}>{snapshot.workspacePath}</small></div></div>
           <nav className="timeline" aria-label="Round 列表">
-            {snapshot.rounds.map(round => <button key={round.id} className={`timeline-item ${selectedId === round.id ? 'selected' : ''}`} onClick={() => setSelectedId(round.id)} title={`Round ${round.sequence} · ${modeLabels[round.mode]} · ${statusLabels[round.status]}`}>
+            {snapshot.rounds.map(round => <button key={round.id} className={`timeline-item ${selectedId === round.id ? 'selected' : ''} ${currentRound?.id === round.id ? 'current' : ''}`} onClick={() => selectRound(round.id)} title={`Round ${round.sequence} · ${modeLabels[round.mode]} · ${statusLabels[round.status]}`}>
               <span className="thumbnail-page" data-round={round.sequence}>
                 <span className="thumbnail-eyebrow">{modeLabels[round.mode]} · Round {round.sequence}</span>
                 <span className="thumbnail-title">{round.title || `Round ${round.sequence}`}</span>
                 <span className="thumbnail-lines" aria-hidden="true"><i/><i/><i/><i/></span>
+                {currentRound?.id === round.id && <span className="thumbnail-current">当前</span>}
                 <span className={`thumbnail-state state-${round.status}`}>{statusLabels[round.status]}</span>
               </span>
-              <span className="timeline-copy"><strong>{round.title || `Round ${round.sequence}`}</strong><small>{modeLabels[round.mode]}</small></span>
+              <span className="timeline-copy"><strong>{round.title || `Round ${round.sequence}`}</strong><small>{modeLabels[round.mode]}{currentRound?.id === round.id ? ' · 当前' : ''}</small></span>
             </button>)}
           </nav>
-          <button className={`runner-mini ${snapshot.running && !runnerOpen ? 'visible' : ''}`} onClick={() => { runnerFollowLatest.current = true; setRunnerOpen(true) }} aria-label="展开 Runner" tabIndex={snapshot.running && !runnerOpen ? 0 : -1}><span className="live-dot"/><span className="runner-mini-label">{cancelling ? '正在停止…' : '正在运行 · 查看过程'}</span></button>
+          <button className={`runner-mini ${runnerEvents.length > 0 && !runnerOpen ? 'visible' : ''}`} onClick={() => { runnerFollowLatest.current = true; setRunnerHasNewEvents(false); setRunnerOpen(true) }} aria-label="展开 Runner" tabIndex={runnerEvents.length > 0 && !runnerOpen ? 0 : -1}><span className={snapshot.running ? 'live-dot' : 'idle-dot'}/><span className="runner-mini-label">{cancelling ? '正在停止…' : snapshot.running ? '正在运行 · 查看过程' : '最近运行 · 查看过程'}</span></button>
         </aside>
+        {!sidebarCollapsed && <div className="pane-resizer pane-resizer-sidebar" role="separator" aria-orientation="vertical" aria-label="调整 Round 侧栏宽度" onPointerDown={event => beginPaneResize('sidebar', event)} onDoubleClick={() => setSidebarWidth(196)} />}
         <section className="result-pane" aria-label="结果页面">
           <div className="result-scroll">
+            {viewingHistoricalRound && currentRound && <div className="history-banner"><div><span>正在查看历史</span><strong>Round {selectedRound?.sequence} · {selectedRound ? modeLabels[selectedRound.mode] : ''}</strong></div><button onClick={returnToCurrentRound}>返回当前 Round {currentRound.sequence} →</button></div>}
             {selectedRound ? <RoundView key={selectedRound.id} round={selectedRound} />
               : snapshot.historyState === 'backend-unavailable' ? <article className="document"><div className="document-header"><div className="eyebrow">OPENCODE SESSION READY</div><h1>OpenCode runtime ready</h1><p>OpenCode Session 已在后台预热完成，但尚未产生 Temporal Round。第一次提交会沿用该 OpenCode Session 并创建 Round 1。</p></div></article>
               : <div className="blank-state"><div className="blank-symbol">⌁</div><h2>暂无结果</h2><p>在右侧写下目标，选择模式并提交。</p></div>}
           </div>
           <section className={`runner-panel ${runnerOpen ? 'open' : ''} ${cancelling ? 'stopping' : ''}`} aria-label="Runner 事件" aria-hidden={!runnerOpen}>
             <div className="runner-header">
-              <div><span className={snapshot.running ? 'live-dot' : 'idle-dot'}/><strong>{cancelling ? 'Stopping…' : snapshot.running ? 'Running' : 'Runner'}</strong><span>{modeLabels[mode]}</span></div>
+              <div><span className={snapshot.running ? 'live-dot' : 'idle-dot'}/><strong>{cancelling ? 'Stopping…' : snapshot.running ? 'Running' : runnerEvents.length ? 'Completed' : 'Runner'}</strong><span>{modeLabels[runnerMode]}{!snapshot.running && runnerDuration ? ` · ${runnerDuration}` : ''}</span></div>
               <div className="runner-actions">{snapshot.running && <button className="runner-stop" onClick={() => void cancelRun()} disabled={cancelling} aria-label="停止当前运行">{cancelling ? '停止中…' : '停止'}</button>}<button onClick={() => setRunnerOpen(false)} aria-label="收起 Runner">收起</button></div>
             </div>
             <div className="runner-events" ref={runnerEventsHost} onScroll={handleRunnerScroll} role="log" aria-live="polite">{runnerEvents.length ? runnerEvents.map(event => <div className={`runner-event event-${event.kind}`} key={event.id}><span className="runner-prefix">{event.kind}</span><span className="runner-message">{renderRunnerMessage(event, activeRunnerToolId, runnerNow)}</span></div>) : <p className="runner-empty">等待运行事件…</p>}</div>
+            {runnerHasNewEvents && <button className="runner-new-events" onClick={jumpRunnerToLatest}>↓ 有新事件 · 回到底部</button>}
           </section>
         </section>
-        <section className="spec-pane" aria-label="Spec 编辑器"><div className="spec-toolbar"><div className="segmented" aria-label="运行模式">{(['plan', 'vibe', 'loop'] as const).map(item => <button key={item} className={mode === item ? 'active' : ''} onClick={() => queueDraft(draft, item)} disabled={snapshot.running || busy} aria-pressed={mode === item}>{modeLabels[item]}</button>)}</div><div className="segmented" aria-label="编辑器视图"><button className={sourceView ? 'active' : ''} onClick={() => setSourceView(true)} aria-pressed={sourceView}>Source</button><button className={!sourceView ? 'active' : ''} onClick={() => setSourceView(false)} aria-pressed={!sourceView}>MD</button></div></div>
+        <div className="pane-resizer pane-resizer-spec" role="separator" aria-orientation="vertical" aria-label="调整 Spec 面板宽度" onPointerDown={event => beginPaneResize('spec', event)} onDoubleClick={() => setSpecWidth(390)} />
+        <section className="spec-pane" aria-label="Spec 编辑器">
+          <div className={`spec-context ${snapshot.running ? 'next-spec' : ''}`}>
+            <span className="eyebrow">{snapshot.running ? 'NEXT SPEC' : 'SPEC'}</span>
+            <strong>{continuesActiveRound ? `继续 Round ${activeRound?.sequence} · ${modeLabels[mode]}` : `下一次提交 · Round ${submitRoundSequence} · ${modeLabels[mode]}`}</strong>
+            <small>{snapshot.running ? '当前任务正在执行；这里的内容只用于下一次提交，不会改变当前运行。' : continuesActiveRound ? '本次提交会继续当前 Round。' : activeRound ? `切换模式会结束 Round ${activeRound.sequence}，并创建新 Round。` : '本次提交会创建新的 Round。'}</small>
+          </div>
+          <div className="spec-toolbar"><div className="segmented" aria-label="下一次提交模式">{(['plan', 'vibe', 'loop'] as const).map(item => <button key={item} className={mode === item ? 'active' : ''} onClick={() => queueDraft(draft, item)} disabled={busy} aria-pressed={mode === item}>{modeLabels[item]}</button>)}</div><div className="segmented" aria-label="编辑器视图"><button className={sourceView ? 'active' : ''} onClick={() => setSourceView(true)} aria-pressed={sourceView}>Source</button><button className={!sourceView ? 'active' : ''} onClick={() => setSourceView(false)} aria-pressed={!sourceView}>MD</button></div></div>
           <div className="spec-body"><div className={`editor-container ${sourceView ? '' : 'hidden'}`}><CodeMirrorEditor key={snapshot.session.id} value={draft} onFocus={() => { editorFocused.current = true }} onBlur={() => { editorFocused.current = false }} onChange={value => queueDraft(value, mode)}/>{!draft && <span className="editor-placeholder" aria-hidden="true"># Spec<br/><br/>描述希望完成的工作…</span>}</div><div className={`spec-preview markdown-body ${sourceView ? 'hidden' : ''}`}>{draft.trim() ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{draft}</ReactMarkdown> : <p className="muted">Spec 预览会显示在这里。</p>}</div></div>
-          <div className="spec-footer"><div className="footer-actions"><button className="secondary-button" onClick={endRound} disabled={busy || snapshot.running || !snapshot.rounds.some(round => round.status === 'active')}>结束当前轮次</button><button className="primary-button" onClick={submit} disabled={busy || snapshot.running || !draft.trim()}>{snapshot.running ? '运行中…' : '提交'}</button></div></div>
+          <div className="spec-footer"><div className="footer-actions"><button className="secondary-button" onClick={endRound} disabled={busy || snapshot.running || !activeRound}>{activeRound ? `结束 Round ${activeRound.sequence}` : '无进行中 Round'}</button><button className="primary-button" onClick={submit} disabled={busy || snapshot.running || !draft.trim()}>{snapshot.running ? '当前任务运行中' : `提交到 Round ${submitRoundSequence}`}</button></div></div>
         </section>
       </main>}
 
