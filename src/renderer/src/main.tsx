@@ -141,7 +141,7 @@ function RoundView({ round, onStartLoop, busy, pendingPlanInput }: {
       {round.vibeEntries.length > 0 ? <section className="vibe-timeline">
         <div className="vibe-view-toolbar">
           <h3>执行记录</h3>
-          <div className="segmented" aria-label="Vibe 阅读方式">
+          <div className="segmented" aria-label="VIBE 阅读方式">
             <button className={vibeView === 'focused' ? 'active' : ''} onClick={() => setVibeView('focused')}>当前迭代</button>
             <button className={vibeView === 'all' ? 'active' : ''} onClick={() => setVibeView('all')}>全部迭代</button>
           </div>
