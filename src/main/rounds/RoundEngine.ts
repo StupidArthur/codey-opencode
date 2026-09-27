@@ -281,7 +281,11 @@ function bundleFromRecords(records: EvidenceSummary[]): EvidenceBundle {
     }
   }
   return {
-    changedFiles, turnChangedFiles: [], newFiles, deletedFiles, preexistingChanges: [],
+    changedFiles: [...new Set(changedFiles)],
+    turnChangedFiles: [],
+    newFiles: [...new Set(newFiles)],
+    deletedFiles: [...new Set(deletedFiles)],
+    preexistingChanges: [],
     ...(gitDiffSummary ? { gitDiffSummary } : {}), toolFacts: [], verification, outcome: 'completed'
   }
 }
