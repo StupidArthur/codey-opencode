@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { realpath } from 'node:fs/promises'
 import type { BrowserWindow } from 'electron'
 import type {
-  HistoryState, ModelSettings, PermissionPreset, RoundMode, RunnerEvent,
+  HistoryState, ModelSettings, PermissionPreset, RoundMode, RunOutcome, RunnerEvent,
   SessionListResult, SessionSummary, WorkspaceSnapshot
 } from '../shared/contracts'
 import { IPC } from '../shared/contracts'
@@ -32,8 +32,7 @@ export class WindowController {
   private activeRunStartedAt: number | undefined
   private lastRunStartedAt: string | undefined
   private lastRunFinishedAt: string | undefined
-  private lastRunOutcome: 'completed' | 'failed' | 'blocked' | 'interrupted' | undefined
-  private runnerSnapshotTimer: ReturnType<typeof setTimeout> | undefined
+  private lastRunOutcome: RunOutcome | undefined
   private runtimePrewarmTimer: ReturnType<typeof setTimeout> | undefined
   private readonly evidence = new EvidenceCollector()
   private readonly resultBuilder = new ResultBuilder()
@@ -116,10 +115,6 @@ export class WindowController {
         permission: nextSession.permission,
         logFile: this.logger.filePath
       })
-      if (this.runnerSnapshotTimer) {
-        clearTimeout(this.runnerSnapshotTimer)
-        this.runnerSnapshotTimer = undefined
-      }
       this.runnerEvents = []
       this.pendingEvidenceEvents = []
       this.lastRunStartedAt = undefined
@@ -235,7 +230,7 @@ export class WindowController {
     this.pendingEvidenceEvents = []
     await this.emitSnapshot()
 
-    let finalOutcome: 'completed' | 'failed' | 'blocked' | 'interrupted' | undefined
+    let finalOutcome: RunOutcome | undefined
     try {
       const result = await this.engine.submit({ session, mode, spec })
       finalOutcome = result.outcome
@@ -398,10 +393,6 @@ export class WindowController {
 
   private async releaseCurrent(): Promise<void> {
     this.cancelScheduledPrewarm()
-    if (this.runnerSnapshotTimer) {
-      clearTimeout(this.runnerSnapshotTimer)
-      this.runnerSnapshotTimer = undefined
-    }
     await this.closeRuntime()
     await this.logger?.flush()
     this.logger = null
@@ -419,16 +410,9 @@ export class WindowController {
     if (this.runnerEvents.length > 200) this.runnerEvents.shift()
     this.pendingEvidenceEvents.push(event)
     if (this.pendingEvidenceEvents.length > 1000) this.pendingEvidenceEvents.shift()
-    this.scheduleRunnerSnapshot()
-  }
-
-  private scheduleRunnerSnapshot(): void {
-    if (this.runnerSnapshotTimer) return
-    this.runnerSnapshotTimer = setTimeout(() => {
-      this.runnerSnapshotTimer = undefined
-      void this.emitSnapshot()
-    }, 100)
-    this.runnerSnapshotTimer.unref?.()
+    // Runner is an append-only live stream. Do not rebuild and resend the
+    // entire Temporal history for every tool/model event.
+    if (!this.window.isDestroyed()) this.window.webContents.send(IPC.runnerEvent, event)
   }
 
   private log(type: string, payload?: unknown): void {
