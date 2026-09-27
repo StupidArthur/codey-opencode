@@ -246,7 +246,20 @@ function App(): React.JSX.Element {
     const sessionChanged = previous?.session?.id !== next.session?.id
     snapshotRef.current = next
     setSnapshot(next)
-    setRunnerEvents(next.runnerEvents)
+    const startingNewRun = next.running && !previous?.running
+    if (sessionChanged || startingNewRun) {
+      setRunnerEvents(next.runnerEvents)
+    } else {
+      // Snapshot and Runner IPC share one renderer but are produced by
+      // different projections. Merge by id so an in-flight snapshot cannot
+      // erase an event that arrived while the snapshot was being built.
+      setRunnerEvents(current => {
+        const merged = new Map<string, RunnerEvent>()
+        for (const event of next.runnerEvents) merged.set(event.id, event)
+        for (const event of current) merged.set(event.id, event)
+        return [...merged.values()].slice(-200)
+      })
+    }
     if (sessionChanged) localDraftDirty.current = false
     if (sessionChanged || (!editorFocused.current && !localDraftDirty.current)) {
       setDraft(next.draft)
