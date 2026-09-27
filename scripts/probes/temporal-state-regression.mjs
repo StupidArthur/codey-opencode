@@ -182,6 +182,36 @@ function engineFor(store, runtime, cancellation = () => false) {
   store.close()
 }
 
+// Crash recovery terminalizes the Loop phase as well as the Round status.
+{
+  const root = await mkdtemp(join(tmpdir(), 'codey-loop-crash-'))
+  const workspace = join(root, 'workspace')
+  await mkdir(workspace)
+  const store = new ProductStore(join(root, 'product.sqlite'))
+  const session = store.createSession(workspace, undefined, 'Loop crash')
+  const round = {
+    id: 'crash-loop-round',
+    sequence: 1,
+    mode: 'loop',
+    status: 'active',
+    title: 'crashed loop',
+    updatedAt: new Date().toISOString(),
+    bodyMarkdown: 'partial output',
+    loopPhase: 'running'
+  }
+  store.saveRound(session.id, round)
+  store.markRoundExecutionStarted(session.id, round.id)
+  const runtime = { prompt: async () => ({ text: '' }) }
+  const engine = engineFor(store, runtime)
+  await engine.reconcileInterrupted(session)
+  const recovered = store.listRounds(session.id)[0]
+  const result = store.getResult(round.id)
+  check('loop_crash_status_interrupted', recovered.status === 'interrupted')
+  check('loop_crash_phase_terminal', recovered.loopPhase === 'terminal')
+  check('loop_crash_saves_interrupted_result', result?.loopTerminal?.status === 'interrupted')
+  store.close()
+}
+
 // Cancellation always leaves a terminal Result rather than a bare interrupted Round.
 {
   const root = await mkdtemp(join(tmpdir(), 'codey-loop-cancel-'))
