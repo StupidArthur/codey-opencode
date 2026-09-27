@@ -605,7 +605,7 @@ function loopAcceptanceSpec(planMarkdown: string): string {
   }
 
   const acceptance = sectionLines(sections, ['验收标准', 'acceptance criteria']).join('\n').trim()
-  const verificationLines = sectionLines(sections, ['验证', 'verification'])
+  const verificationLines = sectionLines(sections, ['验证方法', '验证', 'verification'])
     .map(line => /^\s*(?:[-*+] |\d+[.)]\s+)(.+)$/.exec(line)?.[1]?.trim())
     .filter((line): line is string => Boolean(line))
     .map(normalizeVerificationRequirement)
@@ -617,7 +617,7 @@ function loopAcceptanceSpec(planMarkdown: string): string {
 }
 
 const CHINESE_PLAN_HEADINGS = [
-  '目标', '范围', '当前状态', '实施方案', '影响文件', '验收标准', '验证', '约束', '待确认问题'
+  '目标与范围', '实施计划', '验收标准', '验证方法'
 ] as const
 
 function hasChinesePlanHeadings(markdown: string): boolean {
@@ -636,7 +636,7 @@ function chinesePlanRepairPrompt(previousOutput: string): string {
     '请把下面这份 Plan 完整重写为中文工作文档；代码、文件路径、命令、API 名称和必要技术标识可以保留原文。',
     '必须严格使用且只使用以下一级标题，并保持顺序：',
     ...CHINESE_PLAN_HEADINGS.map(heading => `# ${heading}`),
-    '保留原 Plan 中仍然有效的技术事实、步骤、验收标准和待确认问题，不要省略内容，也不要输出解释。',
+    '保留原 Plan 中仍然有效的技术事实、实施步骤、验收标准和验证方法；旧章节中的背景、影响文件、约束和未决信息应融入最相关的四个章节，不要省略关键内容，也不要输出解释。',
     '',
     '--- 待重写 PLAN ---',
     previousOutput

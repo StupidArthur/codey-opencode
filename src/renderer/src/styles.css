@@ -23,7 +23,7 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-vis
 }
 .title-context{font-size:11px;color:#686862;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}
 .title-actions{justify-self:end;display:flex;align-items:center;gap:6px;min-width:0}
-.settings-trigger{justify-self:end}
+.settings-trigger{justify-self:end;border:1px solid transparent}.settings-trigger:hover{border-color:#deded8}.settings-glyph{font-size:15px;line-height:1;transform:translateY(-.5px)}
 .run-state-chip{
   display:flex;align-items:center;gap:7px;min-width:0;height:28px;padding:0 9px;border:1px solid #deded8;border-radius:999px;
   background:#f5f5f2;color:#666660;font-size:9px;font-weight:750;white-space:nowrap
@@ -150,8 +150,10 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-vis
   pointer-events:none;visibility:hidden;transition:opacity .2s ease,transform .32s cubic-bezier(.22,1,.36,1),visibility .2s
 }
 .runner-mini.visible{opacity:1;transform:translateY(0) scale(1);pointer-events:auto;visibility:visible}
+.runner-mini.idle{background:#242422;color:#efefeb}.runner-mini.running{background:#3a4b40;color:#f0f3f0}
+.runner-mini.running:hover{background:#425549}.runner-mini.idle:hover{background:#30302d}
 .sidebar-collapsed .runner-mini{justify-content:center;padding:10px}
-.live-dot,.idle-dot{display:inline-block;width:7px;height:7px;flex:none;border-radius:50%;background:#49d17f;box-shadow:0 0 0 3px rgba(73,209,127,.13)}
+.live-dot,.idle-dot{display:inline-block;width:7px;height:7px;flex:none;border-radius:50%;background:#7eaa8a;box-shadow:0 0 0 3px rgba(126,170,138,.12)}
 .idle-dot{background:#8d8d87;box-shadow:none}
 
 /* Page stage */
@@ -295,23 +297,25 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-vis
 .spec-preview{width:100%;height:100%;margin:0;padding:24px 24px 90px;border:0;border-radius:0;background:#fbfbfa;box-shadow:none;overflow:auto;font-size:12px}
 .spec-preview.markdown-body{padding:24px 24px 90px}
 .spec-footer{flex:none;padding:10px;border-top:1px solid var(--line);background:rgba(251,251,250,.97)}
-.footer-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.footer-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px}.footer-actions.single{grid-template-columns:1fr}
 .footer-actions button{width:100%;height:36px}
 
 /* Runner: floating execution layer over the page stage. */
 .runner-panel{
-  position:absolute;inset:12px;z-index:10;margin:0;border:1px solid #30302d;border-radius:14px;background:rgba(22,22,21,.985);color:#f1f1ee;
+  position:absolute;inset:12px;z-index:10;margin:0;border:1px solid #3a3a36;border-radius:14px;background:rgba(31,31,29,.985);color:#f1f1ee;
   box-shadow:0 22px 58px rgba(0,0,0,.28),0 2px 10px rgba(0,0,0,.16);display:flex;flex-direction:column;overflow:hidden;
   opacity:0;transform:translate(-42%,42%) scale(.12);transform-origin:left bottom;pointer-events:none;visibility:hidden;
   transition:opacity .18s ease,transform .38s cubic-bezier(.22,1,.36,1),visibility .38s
 }
 .runner-panel.open{opacity:1;transform:translate(0,0) scale(1);pointer-events:auto;visibility:visible}
+.runner-panel.running{border-color:#506356;background:rgba(43,56,47,.985)}
 .runner-panel.stopping{opacity:.9}
-.runner-header{height:42px;flex:none;display:flex;justify-content:space-between;align-items:center;padding:0 10px 0 14px;border-bottom:1px solid #30302d;background:#191918}
+.runner-header{height:42px;flex:none;display:flex;justify-content:space-between;align-items:center;padding:0 10px 0 14px;border-bottom:1px solid #3a3a36;background:#252523}
+.runner-panel.running .runner-header{border-bottom-color:#52665a;background:#34463a}
 .runner-header>div{display:flex;align-items:center;gap:8px;font-size:10px}.runner-header>div span:last-child{color:#9f9f99}
 .runner-actions{display:flex;align-items:center;gap:4px}
 .runner-header button{border:0;background:none;color:#aaa9a4;font-size:10px;padding:5px 7px;border-radius:6px}
-.runner-header button:hover{background:#30302d;color:#fff}
+.runner-header button:hover{background:#3a3a36;color:#fff}.runner-panel.running .runner-header button:hover{background:#46594d}
 .runner-stop{color:#ff9e92!important}
 .runner-stop:hover:not(:disabled){background:#422925!important;color:#fff!important}
 .runner-events{flex:1;overflow:auto;min-height:0;padding:12px 14px 18px;font-family:var(--mono);font-size:10px;line-height:1.55;scrollbar-width:none;-ms-overflow-style:none}

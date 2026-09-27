@@ -15,6 +15,8 @@ const temporal: TemporalApi = {
   getModelSettings: () => ipcRenderer.invoke(IPC.getModelSettings),
   saveModelSettings: (settings: Omit<ModelSettings, 'hasCredential'> & { credential?: string }) =>
     ipcRenderer.invoke(IPC.saveModelSettings, settings),
+  getUiPreferences: () => ipcRenderer.invoke(IPC.getUiPreferences),
+  saveUiPreferences: (preferences) => ipcRenderer.invoke(IPC.saveUiPreferences, preferences),
   onSnapshot: (listener: (snapshot: WorkspaceSnapshot) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, snapshot: WorkspaceSnapshot): void => listener(snapshot)
     ipcRenderer.on(IPC.snapshotChanged, handler)

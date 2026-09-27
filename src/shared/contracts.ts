@@ -56,7 +56,7 @@ export interface RoundSummary {
 }
 
 export interface PlanReadinessCheck {
-  key: 'goal' | 'scope' | 'current-state' | 'implementation' | 'affected-files' | 'acceptance' | 'verification' | 'constraints' | 'open-questions'
+  key: 'goal-scope' | 'implementation' | 'acceptance' | 'verification'
   label: string
   ready: boolean
   detail: string
@@ -208,6 +208,13 @@ export interface ModelSettings {
   hasCredential: boolean
 }
 
+export interface UiPreferences {
+  sidebarCollapsed: boolean
+  runnerOpen: boolean
+  /** Fraction of the document+spec area occupied by the Spec pane. */
+  specPaneRatio: number
+}
+
 export interface WorkspaceSnapshot {
   workspacePath: string | null
   session: SessionSummary | null
@@ -238,6 +245,8 @@ export interface TemporalApi {
   setPermission(preset: PermissionPreset): Promise<void>
   getModelSettings(): Promise<ModelSettings>
   saveModelSettings(settings: Omit<ModelSettings, 'hasCredential'> & { credential?: string }): Promise<ModelSettings>
+  getUiPreferences(): Promise<UiPreferences>
+  saveUiPreferences(preferences: UiPreferences): Promise<UiPreferences>
   onSnapshot(listener: (snapshot: WorkspaceSnapshot) => void): () => void
   onRunnerEvent(listener: (event: RunnerEvent) => void): () => void
 }
@@ -255,6 +264,8 @@ export const IPC = {
   setPermission: 'settings:permission:set',
   getModelSettings: 'settings:model:get',
   saveModelSettings: 'settings:model:save',
+  getUiPreferences: 'settings:ui:get',
+  saveUiPreferences: 'settings:ui:save',
   snapshotChanged: 'workspace:changed',
   runnerEvent: 'runner:event'
 } as const

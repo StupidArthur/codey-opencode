@@ -30,40 +30,29 @@ const { RoundEngine } = await bundle('src/main/rounds/RoundEngine.ts', join(here
 const { EvidenceCollector } = await bundle('src/main/evidence/EvidenceCollector.ts', join(here, '.cache-state-evidence.cjs'))
 const { ResultBuilder } = await bundle('src/main/result/ResultBuilder.ts', join(here, '.cache-state-result.cjs'))
 const { TURN_CANCELLED_MESSAGE } = await bundle('src/main/runtime/AgentRuntime.ts', join(here, '.cache-state-runtime.cjs'))
+const { UiPreferencesStore } = await bundle('src/main/settings/UiPreferencesStore.ts', join(here, '.cache-state-ui-preferences.cjs'))
 
 const checks = {}
 const check = (name, value) => { checks[name] = Boolean(value) }
 
-const readyPlan = `# 目标
+const readyPlan = `# 目标与范围
 完成用户要求的仓库修改，并产生可观察、可验证的最终结果。
-
-# 范围
 - 包含用户要求的实现。
 - 不包含无关重构。
 
-# 当前状态
-已检查相关 Workspace 区域；目标行为尚未实现。
-
-# 实施方案
-1. 在相关源文件中实现目标行为。
-2. 执行验证，并处理与本次修改有关的失败项。
-
-# 影响文件
-- src/example.ts
+# 实施计划
+1. 检查相关实现和调用链，在 src/example.ts 中完成目标行为并保持现有接口兼容。
+2. 调整相关测试覆盖目标行为与回归场景，再处理与本次修改直接相关的失败项。
+3. 检查最终 diff，确保没有引入范围外重构。
 
 # 验收标准
 - src/example.ts 中实现用户要求的行为。
 - 请求范围之外的既有行为保持不变。
 
-# 验证
-- \`pnpm test\`
-- \`pnpm typecheck\`
-
-# 约束
-无
-
-# 待确认问题
-无`
+# 验证方法
+- 运行 \`pnpm test\`，必须全部通过。
+- 运行 \`pnpm typecheck\`，必须 exit code = 0。
+- 检查最终 diff 只包含目标范围内的文件和行为变化。`
 
 function engineFor(store, runtime, cancellation = () => false) {
   return new RoundEngine({
@@ -84,6 +73,25 @@ function engineFor(store, runtime, cancellation = () => false) {
   const session = store.createSession(root, undefined, 'Default mode')
   check('new_session_defaults_to_vibe', store.getDraft(session.id).mode === 'vibe')
   store.close()
+}
+
+// Workspace UI preferences live outside Session/Workspace data and safely
+// recover from a missing or malformed ~/.codey/config.json equivalent.
+{
+  const root = await mkdtemp(join(tmpdir(), 'codey-ui-preferences-'))
+  const configPath = join(root, '.codey', 'config.json')
+  const preferences = new UiPreferencesStore(configPath)
+  const defaults = preferences.load()
+  check('ui_preferences_default_sidebar_expanded', defaults.sidebarCollapsed === false)
+  check('ui_preferences_default_runner_closed', defaults.runnerOpen === false)
+
+  const saved = preferences.save({ sidebarCollapsed: true, runnerOpen: true, specPaneRatio: 0.57 })
+  const restored = new UiPreferencesStore(configPath).load()
+  check('ui_preferences_round_trip', saved.sidebarCollapsed && restored.runnerOpen && restored.specPaneRatio === 0.57)
+
+  await writeFile(configPath, '{not-json')
+  const recovered = preferences.load()
+  check('ui_preferences_malformed_config_falls_back', recovered.sidebarCollapsed === false && recovered.runnerOpen === false)
 }
 
 // Vibe request failure is a turn failure, not a terminal Round.
@@ -175,7 +183,7 @@ function engineFor(store, runtime, cancellation = () => false) {
   const store = new ProductStore(join(root, 'product.sqlite'))
   const session = store.createSession(workspace, undefined, 'Chinese plan')
   let planPrompts = 0
-  const englishPlan = '# Goal\nDo the requested work.\n\n# Scope\n- Requested change only.\n\n# Current State\nRepository inspected.\n\n# Implementation\n1. Change code.\n2. Verify code.\n\n# Affected Files\n- src/example.ts\n\n# Acceptance Criteria\n- Requested behavior exists.\n- Existing behavior remains.\n\n# Verification\n- `pnpm test`\n\n# Constraints\nNone\n\n# Open Questions\nNone'
+  const englishPlan = '# Goal and Scope\nDo the requested work without unrelated refactors.\n\n# Implementation\n1. Update src/example.ts with the requested behavior.\n2. Adjust relevant tests and inspect the final diff.\n\n# Acceptance Criteria\n- Requested behavior exists.\n- Existing behavior remains.\n\n# Verification\n- `pnpm test`\n- `pnpm typecheck`'
   const runtime = {
     prompt: async () => {
       planPrompts += 1
@@ -187,8 +195,9 @@ function engineFor(store, runtime, cancellation = () => false) {
   const round = store.listRounds(session.id)[0]
   const plan = store.listPlanVersions(round.id).at(-1)
   check('chinese_plan_reaches_ready', round.loopPhase === 'ready' && plan?.readiness?.ready === true)
-  check('chinese_plan_readiness_labels_are_chinese', plan?.readiness?.checks[0]?.label === '目标')
-  check('non_chinese_plan_is_repaired_before_save', planPrompts === 2 && plan?.planMarkdown.startsWith('# 目标'))
+  check('spec_plan_has_four_readiness_dimensions', plan?.readiness?.checks.length === 4)
+  check('chinese_plan_readiness_labels_are_chinese', plan?.readiness?.checks[0]?.label === '目标与范围')
+  check('non_chinese_plan_is_repaired_before_save', planPrompts === 2 && plan?.planMarkdown.startsWith('# 目标与范围'))
   store.close()
 }
 
