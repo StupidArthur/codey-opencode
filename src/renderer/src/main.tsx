@@ -7,6 +7,9 @@ import type { EvidenceSummary, InteractiveMode, ModelSettings, PermissionPreset,
 import './styles.css'
 
 const modeLabels: Record<RoundMode, string> = { plan: 'Plan', vibe: 'Vibe', loop: 'Loop' }
+const loopPhaseLabels: Record<NonNullable<RoundDetail['loopPhase']>, string> = {
+  planning: 'Planning', ready: 'Ready', running: 'Running', terminal: 'Terminal'
+}
 const statusLabels: Record<string, string> = {
   active: '进行中', completed: '已完成', blocked: '已阻塞', budget_exhausted: '预算已耗尽', failed: '失败', interrupted: '已中断'
 }
@@ -83,7 +86,7 @@ function RoundView({ round, onStartLoop, busy, pendingPlanInput }: {
   }, [round.vibeEntries.length])
 
   const header = <div className="document-header">
-    <div className="eyebrow">ROUND {round.sequence} · {modeLabels[round.mode]}</div>
+    <div className="eyebrow">ROUND {round.sequence} · {modeLabels[round.mode]}{round.mode === 'loop' && round.loopPhase ? ` · ${loopPhaseLabels[round.loopPhase]}` : ''}</div>
     <h1>{round.title}</h1>
     <div className="document-meta"><span className={`status status-${round.status}`}>{statusLabels[round.status]}</span><span>{new Date(round.updatedAt).toLocaleString()}</span></div>
   </div>
@@ -671,13 +674,13 @@ function App(): React.JSX.Element {
           <nav className="timeline" aria-label="Round 列表">
             {snapshot.rounds.map(round => <button key={round.id} className={`timeline-item ${selectedId === round.id ? 'selected' : ''} ${activeRound?.id === round.id ? 'current' : ''}`} onClick={() => selectRound(round.id)} title={`Round ${round.sequence} · ${modeLabels[round.mode]} · ${statusLabels[round.status]}`}>
               <span className="thumbnail-page" data-round={round.sequence}>
-                <span className="thumbnail-eyebrow">{modeLabels[round.mode]} · Round {round.sequence}</span>
+                <span className="thumbnail-eyebrow">{modeLabels[round.mode]}{round.mode === 'loop' && round.loopPhase ? ` · ${loopPhaseLabels[round.loopPhase]}` : ''} · Round {round.sequence}</span>
                 <span className="thumbnail-title">{round.title || `Round ${round.sequence}`}</span>
                 <span className="thumbnail-lines" aria-hidden="true"><i/><i/><i/><i/></span>
                 {activeRound?.id === round.id && <span className="thumbnail-current">当前</span>}
                 <span className={`thumbnail-state state-${round.status}`}>{statusLabels[round.status]}</span>
               </span>
-              <span className="timeline-copy"><strong>{round.title || `Round ${round.sequence}`}</strong><small>{modeLabels[round.mode]}{activeRound?.id === round.id ? ' · 当前' : ''}</small></span>
+              <span className="timeline-copy"><strong>{round.title || `Round ${round.sequence}`}</strong><small>{modeLabels[round.mode]}{round.mode === 'loop' && round.loopPhase ? ` · ${loopPhaseLabels[round.loopPhase]}` : ''}{activeRound?.id === round.id ? ' · 当前' : ''}</small></span>
             </button>)}
           </nav>
           <button
@@ -735,7 +738,7 @@ function App(): React.JSX.Element {
                       : '本次提交会创建新的 Vibe Round。'}</small>
           </div>
           <div className="spec-toolbar"><div className="segmented" aria-label="下一次提交模式">{(['vibe', 'loop'] as const).map(item => <button key={item} className={mode === item ? 'active' : ''} onClick={() => queueDraft(draft, item)} disabled={busy} aria-pressed={mode === item}>{modeLabels[item]}</button>)}</div><div className="segmented" aria-label="编辑器视图"><button className={sourceView ? 'active' : ''} onClick={() => setSourceView(true)} aria-pressed={sourceView}>Source</button><button className={!sourceView ? 'active' : ''} onClick={() => setSourceView(false)} aria-pressed={!sourceView}>MD</button></div></div>
-          <div className="spec-body"><div className={`editor-container ${sourceView ? '' : 'hidden'}`}><CodeMirrorEditor key={snapshot.session.id} value={draft} onFocus={() => { editorFocused.current = true }} onBlur={() => { editorFocused.current = false }} onChange={value => queueDraft(value, mode)}/>{!draft && <span className="editor-placeholder" aria-hidden="true"># Spec<br/><br/>描述希望完成的工作…</span>}</div><div className={`spec-preview markdown-body ${sourceView ? 'hidden' : ''}`}>{draft.trim() ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{draft}</ReactMarkdown> : <p className="muted">Spec 预览会显示在这里。</p>}</div></div>
+          <div className="spec-body"><div className={`editor-container ${sourceView ? '' : 'hidden'}`}><CodeMirrorEditor key={snapshot.session.id} value={draft} onFocus={() => { editorFocused.current = true }} onBlur={() => { editorFocused.current = false }} onChange={value => queueDraft(value, mode)}/>{!draft && <span className="editor-placeholder" aria-hidden="true">{loopPlanning ? <># Plan Input<br/><br/>补充范围、验收标准，或回答 Plan 中的 Open Questions…</> : mode === 'loop' ? <># Loop Goal<br/><br/>描述目标；Codey 会先生成标准 Plan，再由你确认启动…</> : <># Spec<br/><br/>描述希望完成的工作…</>}</span>}</div><div className={`spec-preview markdown-body ${sourceView ? 'hidden' : ''}`}>{draft.trim() ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{draft}</ReactMarkdown> : <p className="muted">Spec 预览会显示在这里。</p>}</div></div>
           <div className="spec-footer"><div className="footer-actions"><button className="secondary-button" onClick={endRound} disabled={busy || snapshot.running || !activeRound}>{activeRound ? `结束 Round ${activeRound.sequence}` : '无进行中 Round'}</button><button className="primary-button" onClick={submit} disabled={busy || snapshot.running || !draft.trim()}>{snapshot.running ? '当前任务运行中' : loopPlanning ? '完善 Plan' : mode === 'loop' ? '生成 Loop Plan' : `提交到 Round ${submitRoundSequence}`}</button></div></div>
         </section>
       </main>}
