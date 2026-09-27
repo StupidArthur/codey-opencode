@@ -18,7 +18,7 @@ const temporal: TemporalApi = {
     const handler = (_event: Electron.IpcRendererEvent, snapshot: WorkspaceSnapshot): void => listener(snapshot)
     ipcRenderer.on(IPC.snapshotChanged, handler)
     return () => ipcRenderer.removeListener(IPC.snapshotChanged, handler)
-  ,
+  },
   onRunnerEvent: (listener: (event: RunnerEvent) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, runnerEvent: RunnerEvent): void => listener(runnerEvent)
     ipcRenderer.on(IPC.runnerEvent, handler)
