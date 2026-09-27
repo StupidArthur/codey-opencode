@@ -565,7 +565,21 @@ function App(): React.JSX.Element {
               <span className="timeline-copy"><strong>{round.title || `Round ${round.sequence}`}</strong><small>{modeLabels[round.mode]}{currentRound?.id === round.id ? ' · 当前' : ''}</small></span>
             </button>)}
           </nav>
-          <button className={`runner-mini ${runnerEvents.length > 0 && !runnerOpen ? 'visible' : ''}`} onClick={() => { runnerFollowLatest.current = true; setRunnerHasNewEvents(false); setRunnerOpen(true) }} aria-label="展开 Runner" tabIndex={runnerEvents.length > 0 && !runnerOpen ? 0 : -1}><span className={snapshot.running ? 'live-dot' : 'idle-dot'}/><span className="runner-mini-label">{cancelling ? '正在停止…' : snapshot.running ? '正在运行 · 查看过程' : '最近运行 · 查看过程'}</span></button>
+          <button
+            className={`runner-mini ${snapshot.running || runnerEvents.length > 0 ? 'visible' : ''} ${runnerOpen ? 'expanded' : ''}`}
+            onClick={() => {
+              if (runnerOpen) {
+                setRunnerOpen(false)
+                return
+              }
+              runnerFollowLatest.current = true
+              setRunnerHasNewEvents(false)
+              setRunnerOpen(true)
+            }}
+            aria-label={runnerOpen ? '收起 Runner' : '展开 Runner'}
+            aria-expanded={runnerOpen}
+            tabIndex={snapshot.running || runnerEvents.length > 0 ? 0 : -1}
+          ><span className={snapshot.running ? 'live-dot' : 'idle-dot'}/><span className="runner-mini-label">{runnerOpen ? '收起控制台' : cancelling ? '正在停止…' : snapshot.running ? '正在运行 · 查看过程' : '最近运行 · 查看过程'}</span></button>
         </aside>
         {!sidebarCollapsed && <div className="pane-resizer pane-resizer-sidebar" role="separator" aria-orientation="vertical" aria-label="调整 Round 侧栏宽度" onPointerDown={event => beginPaneResize('sidebar', event)} onDoubleClick={() => setSidebarWidth(196)} />}
         <section className="result-pane" aria-label="结果页面">
