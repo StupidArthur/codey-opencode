@@ -427,6 +427,29 @@ export class RoundEngine {
           }
         })
       }
+    } else if (round.mode === 'loop') {
+      const versions = store.listPlanVersions(round.id)
+      const latest = versions.at(-1)
+      const evidence = bundleFromRecords(store.listEvidence(round.id), 'interrupted')
+      document = this.deps.resultBuilder.build({
+        finalResponse: latest?.planMarkdown ?? '',
+        evidence,
+        outcome: 'interrupted',
+        loopTerminal: {
+          status: 'interrupted',
+          reason: 'Loop 在 Planning 阶段结束，尚未启动自治执行。'
+        },
+        round: {
+          mode: 'loop',
+          turns: [{ spec: latest?.submittedSpec ?? round.title, outcome: 'interrupted', output: latest?.planMarkdown ?? '' }]
+        }
+      })
+      round.status = 'interrupted'
+      round.loopPhase = 'terminal'
+      round.updatedAt = new Date().toISOString()
+      store.commitRoundTerminal(session.id, round, document)
+      await this.deps.onRoundChanged?.()
+      return
     }
 
     round.status = 'completed'
@@ -445,10 +468,6 @@ export class RoundEngine {
     this.deps.store.saveRound(session.id, round)
   }
 
-  private async finalizeLoopInterrupted(session: SessionSummary, round: RoundSummary): Promise<void> {
-    this.terminate(session, round, 'interrupted')
-  }
-
   private createRound(session: SessionSummary, mode: RoundMode, spec: string): RoundSummary {
     const rounds = this.deps.store.listRounds(session.id)
     const title = titleFor(spec, mode)
@@ -463,7 +482,8 @@ export class RoundEngine {
       status: 'active',
       title,
       updatedAt: new Date().toISOString(),
-      bodyMarkdown: ''
+      bodyMarkdown: '',
+      ...(mode === 'loop' ? { loopPhase: 'planning' as const } : {})
     }
     this.deps.store.saveRound(session.id, round)
     return round
