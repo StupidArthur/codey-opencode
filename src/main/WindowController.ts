@@ -263,6 +263,10 @@ export class WindowController {
     this.assertOwnership()
     const session = this.requireSession()
     if (this.running) throw new Error('当前已有执行任务。')
+    const pending = this.store.getDraft(session.id)
+    if (pending.mode === 'loop' && pending.draft.trim()) {
+      throw new Error('还有未提交的 Plan 输入；请先提交或清空后再 Start Loop。')
+    }
     const settings = await this.getModelSettings()
     if (!settings.provider || !settings.model) throw new Error('请先配置模型 Provider 和 Model。')
 
