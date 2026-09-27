@@ -502,14 +502,21 @@ export class OpenCodeRuntime implements AgentRuntime {
       projection.emittedRunning = true
       this.emit({
         kind: 'tool',
-        message: `${name}\n↳ ${summarizeInput(asRecord(state.input))}`
+        message: `${name}\n↳ ${summarizeInput(asRecord(state.input))}`,
+        tool: {
+          callId,
+          name,
+          status: 'running',
+          ...(startedAt !== undefined ? { startedAt: new Date(startedAt).toISOString() } : {})
+        }
       })
     }
 
     if ((status === 'completed' || status === 'failed') && previous?.status !== status) {
       const time = asRecord(state.time)
       const endedAt = numberOf(time.end) ?? Date.now()
-      const duration = startedAt !== undefined ? formatDuration(Math.max(0, endedAt - startedAt)) : ''
+      const durationMs = startedAt !== undefined ? Math.max(0, endedAt - startedAt) : undefined
+      const duration = durationMs !== undefined ? formatDuration(durationMs) : ''
       const output = status === 'completed' ? stringOf(state.output) : stringOf(state.error)
       const title = stringOf(state.title)
       const summary = [
@@ -517,7 +524,18 @@ export class OpenCodeRuntime implements AgentRuntime {
         `↳ input: ${summarizeInput(asRecord(state.input))}`,
         output ? `↳ output: ${summarizeOutput(output)}` : title ? `↳ ${title}` : ''
       ].filter(Boolean).join('\n')
-      this.emit({ kind: status === 'completed' ? 'tool' : 'error', message: summary })
+      this.emit({
+        kind: status === 'completed' ? 'tool' : 'error',
+        message: summary,
+        tool: {
+          callId,
+          name,
+          status,
+          ...(startedAt !== undefined ? { startedAt: new Date(startedAt).toISOString() } : {}),
+          finishedAt: new Date(endedAt).toISOString(),
+          ...(durationMs !== undefined ? { durationMs } : {})
+        }
+      })
       this.upsertToolFact({
         toolCallId: callId,
         turn: 0,
