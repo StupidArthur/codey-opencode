@@ -30,6 +30,7 @@ export class WindowController {
   private logger: SessionLogger | null = null
   private activeRunId: string | undefined
   private activeRunStartedAt: number | undefined
+  private lastRunStartedAt: string | undefined
   private lastRunFinishedAt: string | undefined
   private lastRunOutcome: 'completed' | 'failed' | 'blocked' | 'interrupted' | undefined
   private runnerSnapshotTimer: ReturnType<typeof setTimeout> | undefined
@@ -121,6 +122,7 @@ export class WindowController {
       }
       this.runnerEvents = []
       this.pendingEvidenceEvents = []
+      this.lastRunStartedAt = undefined
       this.lastRunFinishedAt = undefined
       this.lastRunOutcome = undefined
       this.error = undefined
@@ -153,6 +155,7 @@ export class WindowController {
           }
         : {
             status: 'idle',
+            ...(this.lastRunStartedAt ? { startedAt: this.lastRunStartedAt } : {}),
             ...(this.lastRunFinishedAt ? { finishedAt: this.lastRunFinishedAt } : {}),
             ...(this.lastRunOutcome ? { outcome: this.lastRunOutcome } : {})
           },
@@ -224,6 +227,7 @@ export class WindowController {
     })
     this.cancelRequested = false
     this.running = true
+    this.lastRunStartedAt = new Date(submitStartedAt).toISOString()
     this.lastRunFinishedAt = undefined
     this.lastRunOutcome = undefined
     this.error = undefined
