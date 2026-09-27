@@ -587,17 +587,24 @@ function loopAcceptanceSpec(planMarkdown: string): string {
   const verificationLines = (sections.get('verification') ?? [])
     .map(line => /^\s*(?:[-*+] |\d+[.)]\s+)(.+)$/.exec(line)?.[1]?.trim())
     .filter((line): line is string => Boolean(line))
-    .map(line => {
-      const unquoted = line.replace(/^\`([^\`]+)\`$/, '$1')
-      return /^(?:run|verify|check|exec|execute|运行|验证|执行|检查)\s*[:：]/i.test(unquoted)
-        ? unquoted
-        : `Verify: ${unquoted}`
-    })
+    .map(normalizeVerificationRequirement)
 
   return [
     acceptance || '- Satisfy every Acceptance Criteria item in the approved Plan.',
     ...verificationLines
   ].join('\n')
+}
+
+function normalizeVerificationRequirement(line: string): string {
+  const unquoted = line.replace(/^\`([^\`]+)\`$/, '$1').trim()
+  // Preserve LoopEvaluator's product-owned workspace-write verification path
+  // for common repository checks instead of degrading them to arbitrary shell.
+  if (/\b(typecheck|tsc)\b|类型检查/i.test(unquoted)) return '- Typecheck must pass.'
+  if (/\b(test|tests|pytest)\b|\bgo\s+test\b|\bcargo\s+test\b|测试|单测/i.test(unquoted)) return '- Tests must pass.'
+  if (/\bbuild\b|构建|编译/i.test(unquoted)) return '- Build must pass.'
+  return /^(?:run|verify|check|exec|execute|运行|验证|执行|检查)\s*[:：]/i.test(unquoted)
+    ? unquoted
+    : `Verify: ${unquoted}`
 }
 
 function titleFor(spec: string, mode: RoundMode): string {
