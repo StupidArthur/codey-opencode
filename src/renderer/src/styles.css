@@ -161,10 +161,10 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-vis
   position:relative;min-width:0;min-height:0;overflow:hidden;background:#efefec;
   background-image:radial-gradient(#d9d9d4 .65px,transparent .65px);background-size:14px 14px
 }
-.result-scroll{position:absolute;inset:0;overflow:auto;padding:34px 38px 120px;overscroll-behavior:contain;scrollbar-width:none;-ms-overflow-style:none}
+.result-scroll{position:absolute;inset:0;overflow:auto;padding:clamp(22px,2.2vw,34px) clamp(18px,2.4vw,38px) 120px;overscroll-behavior:contain;scrollbar-width:none;-ms-overflow-style:none}
 .result-scroll::-webkit-scrollbar{width:0;height:0;display:none}
 .history-banner{
-  position:sticky;top:0;z-index:6;width:min(860px,100%);margin:0 auto 12px;padding:9px 11px;
+  position:sticky;top:0;z-index:6;width:100%;margin:0 0 12px;padding:9px 11px;
   display:flex;align-items:center;justify-content:space-between;gap:16px;
   border:1px solid #d8d8d1;border-radius:9px;background:rgba(255,255,252,.96);
   box-shadow:0 7px 22px rgba(25,25,21,.08);backdrop-filter:blur(10px)
@@ -174,7 +174,7 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-vis
 .history-banner strong{font-size:10px;color:#454540;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .history-banner button{border:0;border-radius:7px;background:#252523;color:#fff;padding:6px 9px;font-size:9px;font-weight:750;white-space:nowrap}
 .document{
-  width:min(860px,100%);min-height:680px;margin:0 auto;background:#fff;border:1px solid #dfdfda;border-radius:2px;
+  width:100%;min-height:680px;margin:0;background:#fff;border:1px solid #dfdfda;border-radius:2px;
   box-shadow:0 22px 55px rgba(28,28,24,.07),0 2px 8px rgba(28,28,24,.04);overflow:hidden
 }
 .document-header{
@@ -342,7 +342,7 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-vis
 .dialog-actions{display:flex;justify-content:flex-end;gap:8px;padding:13px 22px 19px;border-top:1px solid #ecece7}
 
 @media(max-width:1180px){
-  .result-scroll{padding:28px 24px 110px}
+  .result-scroll{padding:24px 20px 110px}
   .document-header{padding:44px 46px 26px}
   .markdown-body{padding-left:46px;padding-right:46px}
   .result-block,.vibe-timeline,.evidence-block{padding-left:46px;padding-right:46px}
