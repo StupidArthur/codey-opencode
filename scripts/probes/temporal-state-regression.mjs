@@ -34,6 +34,37 @@ const { TURN_CANCELLED_MESSAGE } = await bundle('src/main/runtime/AgentRuntime.t
 const checks = {}
 const check = (name, value) => { checks[name] = Boolean(value) }
 
+const readyPlan = `# Goal
+Deliver the requested repository change with an observable final result.
+
+# Scope
+- Include the requested implementation.
+- Exclude unrelated refactors.
+
+# Current State
+The relevant workspace area has been inspected and the requested behavior is not yet implemented.
+
+# Implementation
+1. Update the target implementation in the relevant source file.
+2. Verify the change and address any failing checks.
+
+# Affected Files
+- src/example.ts
+
+# Acceptance Criteria
+- The requested behavior is implemented in src/example.ts.
+- Existing behavior outside the requested scope remains unchanged.
+
+# Verification
+- \`pnpm test\`
+- \`pnpm typecheck\`
+
+# Constraints
+None
+
+# Open Questions
+None`
+
 function engineFor(store, runtime, cancellation = () => false) {
   return new RoundEngine({
     store,
@@ -44,6 +75,15 @@ function engineFor(store, runtime, cancellation = () => false) {
     isCancellationRequested: cancellation,
     onRoundChanged: () => {}
   })
+}
+
+// New work defaults to Vibe; legacy Plan drafts are normalized into Loop planning.
+{
+  const root = await mkdtemp(join(tmpdir(), 'codey-default-mode-'))
+  const store = new ProductStore(join(root, 'product.sqlite'))
+  const session = store.createSession(root, undefined, 'Default mode')
+  check('new_session_defaults_to_vibe', store.getDraft(session.id).mode === 'vibe')
+  store.close()
 }
 
 // Vibe request failure is a turn failure, not a terminal Round.
@@ -105,10 +145,15 @@ function engineFor(store, runtime, cancellation = () => false) {
     nextAction: 'ask user'
   }
   const runtime = {
-    prompt: async () => ({ text: 'blocked\n\n\`\`\`temporal-decision\n' + JSON.stringify(decision) + '\n\`\`\`' })
+    prompt: async (_spec, options) => options?.agent === 'plan'
+      ? ({ text: readyPlan })
+      : ({ text: 'blocked\n\n\`\`\`temporal-decision\n' + JSON.stringify(decision) + '\n\`\`\`' })
   }
   const engine = engineFor(store, runtime)
-  const submitted = await engine.submit({ session, mode: 'loop', spec: 'Continue only after user approval' })
+  await engine.submit({ session, mode: 'loop', spec: 'Continue only after user approval' })
+  const planned = store.listRounds(session.id)[0]
+  check('loop_requires_ready_plan_before_start', planned.loopPhase === 'ready' && store.listPlanVersions(planned.id).at(-1)?.readiness?.ready === true)
+  const submitted = await engine.startLoop(session)
   const round = store.listRounds(session.id)[0]
   const result = store.getResult(round.id)
   check('loop_blocked_run_outcome_preserved', submitted.outcome === 'blocked')
@@ -125,14 +170,16 @@ function engineFor(store, runtime, cancellation = () => false) {
   const store = new ProductStore(join(root, 'product.sqlite'))
   const session = store.createSession(workspace, undefined, 'Loop cancel')
   const runtime = {
-    prompt: async () => {
+    prompt: async (_spec, options) => {
+      if (options?.agent === 'plan') return { text: readyPlan }
       await writeFile(join(workspace, 'partial.txt'), 'partial')
       throw new Error(TURN_CANCELLED_MESSAGE)
     },
     takeToolFacts: () => []
   }
   const engine = engineFor(store, runtime)
-  const submitted = await engine.submit({ session, mode: 'loop', spec: 'long task' })
+  await engine.submit({ session, mode: 'loop', spec: 'long task' })
+  const submitted = await engine.startLoop(session)
   const round = store.listRounds(session.id)[0]
   const result = store.getResult(round.id)
   check('loop_cancel_outcome_interrupted', submitted.outcome === 'interrupted' && round.status === 'interrupted')
