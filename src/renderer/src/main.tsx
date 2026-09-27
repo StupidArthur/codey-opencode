@@ -21,7 +21,13 @@ const permissionLabels: Record<PermissionPreset, string> = {
   'danger-full-access': 'Danger full access（允许外部目录）'
 }
 const evidenceKindLabels: Record<EvidenceSummary['kind'], string> = {
-  command: '命令', workspace: '工作区', artifact: '产物', manual: '人工', runtime: '运行时'
+  command: '验证', workspace: '工作区', artifact: '产物', manual: '人工', runtime: '运行时'
+}
+const evidenceOutcomeLabels: Record<EvidenceSummary['outcome'], string> = {
+  passed: '通过', failed: '失败', observed: '已观察'
+}
+const runOutcomeLabels: Record<'completed' | 'failed' | 'blocked' | 'interrupted', string> = {
+  completed: '完成', failed: '失败', blocked: '阻塞', interrupted: '中断'
 }
 
 function ResultView({ result }: { result: ResultSummary }): React.JSX.Element {
@@ -35,12 +41,23 @@ function ResultView({ result }: { result: ResultSummary }): React.JSX.Element {
 }
 
 function EvidenceList({ evidence }: { evidence: EvidenceSummary[] }): React.JSX.Element | null {
-  if (evidence.length === 0) return null
-  return <section className="evidence-block"><h3>Evidence</h3>
-    <div className="evidence-rows">{evidence.map(item => <div className={`evidence-row evidence-${item.outcome}`} key={item.id}>
+  // Runtime tool telemetry belongs in Runner. Keep compatibility with existing
+  // Sessions that already persisted those rows, but never present them as
+  // evidence. Also collapse repeated workspace observations from long Vibe rounds.
+  const meaningful = evidence.filter(item => item.kind !== 'runtime')
+  const deduped = [...new Map(meaningful.map(item => [
+    item.kind === 'workspace' ? `${item.kind}:${item.label}` : item.id,
+    item
+  ])).values()]
+  if (deduped.length === 0) return null
+  return <section className="evidence-block"><h3>验证证据</h3>
+    <div className="evidence-rows">{deduped.map(item => <div className={`evidence-row evidence-${item.outcome}`} key={item.id}>
       <span className="evidence-kind">{evidenceKindLabels[item.kind]}</span>
-      <span className="evidence-label" title={item.detail}>{item.label}</span>
-      <span className="evidence-outcome">{item.outcome}</span>
+      <span className="evidence-copy">
+        <span className="evidence-label">{item.label}</span>
+        {item.detail && <small>{item.detail}</small>}
+      </span>
+      <span className="evidence-outcome">{evidenceOutcomeLabels[item.outcome]}</span>
     </div>)}</div>
   </section>
 }
@@ -395,17 +412,27 @@ function App(): React.JSX.Element {
   const submitRoundSequence = continuesActiveRound ? activeRound!.sequence : (latestRound?.sequence ?? 0) + 1
   const runnerEvents = snapshot?.runnerEvents ?? []
   const runnerMode = activeRound?.mode ?? latestRound?.mode ?? mode
-  const runnerDuration = runnerEvents.length > 1
-    ? formatRunnerDuration(Math.max(0, new Date(runnerEvents.at(-1)!.at).getTime() - new Date(runnerEvents[0].at).getTime()))
+  const runStartedAt = snapshot?.runState.startedAt ? new Date(snapshot.runState.startedAt).getTime() : null
+  const runFinishedAt = snapshot?.runState.finishedAt ? new Date(snapshot.runState.finishedAt).getTime() : null
+  const runElapsed = runStartedAt !== null
+    ? formatRunnerDuration(Math.max(0, (snapshot?.runState.status === 'idle' && runFinishedAt !== null ? runFinishedAt : runnerNow) - runStartedAt))
     : null
+  const runStatusLabel = snapshot?.runState.status === 'running'
+    ? `运行中${runElapsed ? ` · ${runElapsed}` : ''}`
+    : snapshot?.runState.status === 'stopping'
+      ? `停止中${runElapsed ? ` · ${runElapsed}` : ''}`
+      : snapshot?.runState.outcome
+        ? `已结束 · ${runOutcomeLabels[snapshot.runState.outcome]}${runElapsed ? ` · ${runElapsed}` : ''}`
+        : '空闲'
+  const runnerDuration = runElapsed
   const activeRunnerToolId = findActiveRunnerToolId(runnerEvents, snapshot?.running === true)
 
   useEffect(() => {
-    if (!runnerOpen || snapshot?.running !== true) return
+    if (snapshot?.runState.status === 'idle') return
     setRunnerNow(Date.now())
     const timer = window.setInterval(() => setRunnerNow(Date.now()), 1000)
     return () => window.clearInterval(timer)
-  }, [runnerOpen, snapshot?.running])
+  }, [snapshot?.runState.status])
 
   useEffect(() => {
     const previousCount = previousRunnerEventCount.current
@@ -483,7 +510,16 @@ function App(): React.JSX.Element {
     <header className="titlebar">
       <div className="brand"><span className="brand-mark">T</span><span>Temporal Workspace</span></div>
       <span className="title-context">{snapshot?.session?.title ?? 'Workspace'}</span>
-      <button className="text-button settings-trigger" onClick={showSettings} aria-label="模型设置">模型设置</button>
+      <div className="title-actions">
+        {snapshot?.session && <button
+          className={`run-state-chip run-${snapshot.runState.status} ${snapshot.runState.outcome ? `outcome-${snapshot.runState.outcome}` : ''}`}
+          onClick={() => { if (runnerEvents.length > 0) { runnerFollowLatest.current = true; setRunnerHasNewEvents(false); setRunnerOpen(true) } }}
+          disabled={runnerEvents.length === 0}
+          aria-live="polite"
+          title={runnerEvents.length > 0 ? '打开 Runner' : '当前没有 Runner 事件'}
+        ><span className="run-state-dot"/><span>{runStatusLabel}</span></button>}
+        <button className="text-button settings-trigger" onClick={showSettings} aria-label="模型设置">模型设置</button>
+      </div>
     </header>
     {error && <div className="error-banner" role="alert"><span>{error}</span><button onClick={() => setError('')} aria-label="关闭错误">×</button></div>}
     {snapshot?.error && snapshot.error !== error && <div className="error-banner" role="alert">{snapshot.error}</div>}
@@ -541,7 +577,7 @@ function App(): React.JSX.Element {
           </div>
           <section className={`runner-panel ${runnerOpen ? 'open' : ''} ${cancelling ? 'stopping' : ''}`} aria-label="Runner 事件" aria-hidden={!runnerOpen}>
             <div className="runner-header">
-              <div><span className={snapshot.running ? 'live-dot' : 'idle-dot'}/><strong>{cancelling ? 'Stopping…' : snapshot.running ? 'Running' : runnerEvents.length ? 'Completed' : 'Runner'}</strong><span>{modeLabels[runnerMode]}{!snapshot.running && runnerDuration ? ` · ${runnerDuration}` : ''}</span></div>
+              <div><span className={snapshot.runState.status === 'running' ? 'live-dot' : 'idle-dot'}/><strong>{snapshot.runState.status === 'running' ? '运行中' : snapshot.runState.status === 'stopping' ? '停止中' : snapshot.runState.outcome ? `已结束 · ${runOutcomeLabels[snapshot.runState.outcome]}` : 'Runner'}</strong><span>{modeLabels[runnerMode]}{runnerDuration ? ` · ${runnerDuration}` : ''}</span></div>
               <div className="runner-actions">{snapshot.running && <button className="runner-stop" onClick={() => void cancelRun()} disabled={cancelling} aria-label="停止当前运行">{cancelling ? '停止中…' : '停止'}</button>}<button onClick={() => setRunnerOpen(false)} aria-label="收起 Runner">收起</button></div>
             </div>
             <div className="runner-events" ref={runnerEventsHost} onScroll={handleRunnerScroll} role="log" aria-live="polite">{runnerEvents.length ? runnerEvents.map(event => <div className={`runner-event event-${event.kind}`} key={event.id}><span className="runner-prefix">{event.kind}</span><span className="runner-message">{renderRunnerMessage(event, activeRunnerToolId, runnerNow)}</span></div>) : <p className="runner-empty">等待运行事件…</p>}</div>
