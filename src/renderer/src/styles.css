@@ -22,7 +22,26 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-vis
   font-size:10px;font-weight:800;letter-spacing:-.03em
 }
 .title-context{font-size:11px;color:#686862;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}
+.title-actions{justify-self:end;display:flex;align-items:center;gap:6px;min-width:0}
 .settings-trigger{justify-self:end}
+.run-state-chip{
+  display:flex;align-items:center;gap:7px;min-width:0;height:28px;padding:0 9px;border:1px solid #deded8;border-radius:999px;
+  background:#f5f5f2;color:#666660;font-size:9px;font-weight:750;white-space:nowrap
+}
+.run-state-chip:disabled{opacity:1;cursor:default}
+.run-state-chip:not(:disabled):hover{background:#eeeeea}
+.run-state-dot{width:7px;height:7px;flex:none;border-radius:50%;background:#999993}
+.run-state-chip.run-running,.run-state-chip.run-stopping{border-color:#cfe3d4;background:#f4faf5;color:#366245}
+.run-state-chip.run-running .run-state-dot{background:#42b96e;box-shadow:0 0 0 3px rgba(66,185,110,.13);animation:run-pulse 1.5s ease-in-out infinite}
+.run-state-chip.run-stopping{border-color:#e5d5ae;background:#fff9ed;color:#7f6429}
+.run-state-chip.run-stopping .run-state-dot{background:#bd9135}
+.run-state-chip.outcome-completed{border-color:#d7e5da;background:#f6faf7;color:#477153}
+.run-state-chip.outcome-completed .run-state-dot{background:#6b9b77}
+.run-state-chip.outcome-failed{border-color:#efd8d3;background:#fff6f3;color:#99483c}
+.run-state-chip.outcome-failed .run-state-dot{background:#c86859}
+.run-state-chip.outcome-blocked,.run-state-chip.outcome-interrupted{border-color:#eadfbd;background:#fffaf0;color:#836b32}
+.run-state-chip.outcome-blocked .run-state-dot,.run-state-chip.outcome-interrupted .run-state-dot{background:#b08c3f}
+@keyframes run-pulse{0%,100%{opacity:1}50%{opacity:.45}}
 .text-button{border:0;background:transparent;color:#666660;font-size:11px;font-weight:600;padding:6px 8px;border-radius:7px}
 .text-button:hover{background:#ecece8;color:#1f1f1d}
 
@@ -203,10 +222,13 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-vis
 .result-section.remaining h3{color:#8f6331}
 .evidence-block{padding:8px 62px 44px}
 .evidence-rows{display:flex;flex-direction:column}
-.evidence-row{display:grid;grid-template-columns:54px minmax(0,1fr) auto;align-items:center;gap:12px;padding:8px 0;border-top:1px solid #eeeeea;font-size:10px}
+.evidence-row{display:grid;grid-template-columns:54px minmax(0,1fr) auto;align-items:start;gap:12px;padding:9px 0;border-top:1px solid #eeeeea;font-size:10px}
 .evidence-row:last-child{border-bottom:1px solid #eeeeea}
-.evidence-kind{color:#888882;font-weight:700}.evidence-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#4a4a45}
-.evidence-outcome{font-weight:700;color:#787872}.evidence-passed .evidence-outcome{color:#39734f}.evidence-failed .evidence-outcome{color:#a34a3c}
+.evidence-kind{padding-top:1px;color:#888882;font-weight:700}
+.evidence-copy{display:grid;gap:3px;min-width:0}
+.evidence-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#41413d;font-weight:650}
+.evidence-copy small{color:#8a8a84;font-size:9px;line-height:1.45;white-space:normal;overflow-wrap:anywhere}
+.evidence-outcome{padding-top:1px;font-weight:700;color:#787872}.evidence-passed .evidence-outcome{color:#39734f}.evidence-failed .evidence-outcome{color:#a34a3c}
 
 .vibe-timeline{padding:12px 62px 20px}
 .vibe-entry{padding:18px 0 24px;border-top:1px solid #e8e8e3;background:transparent}
@@ -302,6 +324,7 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-vis
 }
 @media(max-width:720px){
   .titlebar{grid-template-columns:1fr auto}.title-context{display:none}
+  .run-state-chip{max-width:180px;overflow:hidden;text-overflow:ellipsis}
   .history-banner{align-items:flex-start;flex-direction:column}.history-banner button{width:100%}
   .workspace,.workspace.sidebar-collapsed{grid-template-columns:54px minmax(0,1fr);grid-template-rows:minmax(0,1fr) minmax(250px,42%)}
   .sidebar{grid-row:1/3}.result-pane{grid-column:2;grid-row:1}.result-scroll{padding:18px 14px 90px}
