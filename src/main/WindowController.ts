@@ -259,7 +259,7 @@ export class WindowController {
     }
   }
 
-  async startLoop(): Promise<void> {
+  async startLoop(force = false): Promise<void> {
     this.assertOwnership()
     const session = this.requireSession()
     if (this.running) throw new Error('当前已有执行任务。')
@@ -276,6 +276,7 @@ export class WindowController {
     this.activeRunStartedAt = startedAt
     this.log('loop.start', {
       backend: 'opencode',
+      force,
       provider: settings.provider,
       model: settings.model,
       permission: session.permission,
@@ -293,11 +294,11 @@ export class WindowController {
 
     let finalOutcome: RunOutcome | undefined
     try {
-      const result = await this.engine.startLoop(session)
+      const result = await this.engine.startLoop(session, force)
       finalOutcome = result.outcome
-      this.log('loop.end', { outcome: result.outcome, roundId: result.roundId, durationMs: Date.now() - startedAt })
+      this.log('loop.end', { force, outcome: result.outcome, roundId: result.roundId, durationMs: Date.now() - startedAt })
     } catch (error) {
-      this.log('loop.error', { durationMs: Date.now() - startedAt, cancelled: this.cancelRequested, error: messageOf(error) })
+      this.log('loop.error', { force, durationMs: Date.now() - startedAt, cancelled: this.cancelRequested, error: messageOf(error) })
       if (!this.cancelRequested) {
         finalOutcome = 'failed'
         this.error = messageOf(error)
