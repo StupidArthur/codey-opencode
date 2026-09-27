@@ -38,7 +38,7 @@ const { EvidenceCollector } = await bundle('src/main/evidence/EvidenceCollector.
 const { VerificationExecutor } = await bundle('src/main/evidence/VerificationExecutor.ts', join(here, '.cache-domain-verify.cjs'))
 const { ResultBuilder } = await bundle('src/main/result/ResultBuilder.ts', join(here, '.cache-domain-result.cjs'))
 const { LoopController, DEFAULT_LOOP_BUDGET } = await bundle('src/main/loop/LoopController.ts', join(here, '.cache-domain-loop.cjs'))
-const { TURN_DEADLINE_MESSAGE } = await bundle('src/main/dsh/DshRuntime.ts', join(here, '.cache-domain-runtime.cjs'))
+const { TURN_DEADLINE_MESSAGE } = await bundle('src/main/runtime/AgentRuntime.ts', join(here, '.cache-domain-runtime.cjs'))
 
 const checks = {}
 const check = (name, value) => { checks[name] = Boolean(value) }
