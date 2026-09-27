@@ -35,7 +35,7 @@ export type DecisionParseResult =
 export const DECISION_FENCE = 'temporal-decision'
 
 /** The contract the loop presents to the model on every turn. */
-export function decisionInstruction(rootSpec: string): string {
+export function decisionInstruction(rootSpec: string, executionContext?: string): string {
   return [
     'You are working inside a product-managed execution loop on the task below.',
     'Work on the task with your tools as usual.',
@@ -48,8 +48,13 @@ export function decisionInstruction(rootSpec: string): string {
     '- coverage lists every requirement you can identify in the task with an honest status; "uncertain" never counts as done.',
     '- evidence cites ids from the evidence inventory provided in the conversation: "e3" for a verification run, "w2" for a workspace artifact you produced. Use [] when none applies. Cite only evidence that actually exists and supports the item.',
     '- When the loop asks you to run a verification script (temporal-verify/*.cmd), run exactly that command before claiming the related item is met.',
-    '',
-    '---',
+    ...(executionContext?.trim() ? [
+      '',
+      '--- APPROVED EXECUTION PLAN ---',
+      executionContext.trim(),
+      '',
+      '--- ACCEPTANCE SPEC ---'
+    ] : ['', '---']),
     '',
     rootSpec
   ].join('\n')

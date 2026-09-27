@@ -49,7 +49,10 @@ export const DEFAULT_LOOP_BUDGET: LoopBudget = {
 }
 
 export interface LoopRunInput {
+  /** Acceptance-focused spec evaluated by the completion gate. */
   rootSpec: string
+  /** Full frozen Plan shown to the build agent but not parsed as requirements. */
+  executionContext?: string
   workspacePath: string
   /** Session permission preset the verification executor must obey. */
   permission: PermissionPreset
@@ -105,7 +108,7 @@ export class LoopController {
     let continuations = 0
     let turn = 0
     let finalResponse = ''
-    let prompt = decisionInstruction(input.rootSpec)
+    let prompt = decisionInstruction(input.rootSpec, input.executionContext)
     let failure: string | undefined
     let lastDecision: LoopDecision | undefined
     let lastIncompleteCount = Number.MAX_SAFE_INTEGER

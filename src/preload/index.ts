@@ -1,13 +1,14 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import { IPC, type ModelSettings, type RoundMode, type RunnerEvent, type TemporalApi, type WorkspaceSnapshot } from '../shared/contracts'
+import { IPC, type InteractiveMode, type ModelSettings, type RunnerEvent, type TemporalApi, type WorkspaceSnapshot } from '../shared/contracts'
 
 const temporal: TemporalApi = {
   chooseWorkspace: () => ipcRenderer.invoke(IPC.chooseWorkspace),
   listSessions: (workspacePath) => ipcRenderer.invoke(IPC.listSessions, workspacePath),
   openSession: (workspacePath, sessionId) => ipcRenderer.invoke(IPC.openSession, workspacePath, sessionId),
   getSnapshot: () => ipcRenderer.invoke(IPC.getSnapshot),
-  saveDraft: (draft: string, mode: RoundMode) => ipcRenderer.invoke(IPC.saveDraft, draft, mode),
-  submit: (spec: string, mode: RoundMode) => ipcRenderer.invoke(IPC.submit, spec, mode),
+  saveDraft: (draft: string, mode: InteractiveMode) => ipcRenderer.invoke(IPC.saveDraft, draft, mode),
+  submit: (spec: string, mode: InteractiveMode) => ipcRenderer.invoke(IPC.submit, spec, mode),
+  startLoop: () => ipcRenderer.invoke(IPC.startLoop),
   cancelRun: () => ipcRenderer.invoke(IPC.cancelRun),
   endRound: () => ipcRenderer.invoke(IPC.endRound),
   setPermission: (preset) => ipcRenderer.invoke(IPC.setPermission, preset),

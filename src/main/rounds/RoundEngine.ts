@@ -1,12 +1,12 @@
 import { randomUUID } from 'node:crypto'
-import type { EvidenceSummary, ExecutionOutcome, LoopTerminalSummary, RoundMode, RoundStatus, RoundSummary, RunOutcome, RunnerEvent, SessionSummary } from '../../shared/contracts'
+import type { EvidenceSummary, ExecutionOutcome, InteractiveMode, LoopTerminalSummary, RoundMode, RoundStatus, RoundSummary, RunOutcome, RunnerEvent, SessionSummary } from '../../shared/contracts'
 import type { AgentRuntime } from '../runtime/AgentRuntime'
 import { TURN_CANCELLED_MESSAGE } from '../runtime/AgentRuntime'
 import type { EvidenceCollector } from '../evidence/EvidenceCollector'
 import type { EvidenceBundle, VerificationExecutorFn, VerificationRun, WorkspaceSnapshot as EvidenceWorkspaceSnapshot } from '../evidence/evidence'
 import { LoopController } from '../loop/LoopController'
 import type { ProductStore } from '../persistence/ProductStore'
-import { planGuidance } from '../plan/PlanGuidance'
+import { evaluatePlanReadiness, loopPlanGuidance } from '../plan/PlanGuidance'
 import type { ResultBuilder } from '../result/ResultBuilder'
 
 export interface RoundEngineDeps {
@@ -28,109 +28,139 @@ export interface RoundEngineDeps {
 
 export interface SubmitInput {
   session: SessionSummary
-  mode: RoundMode
+  mode: InteractiveMode
   spec: string
 }
 
 /**
- * Turns one user submit into a product Round. Plan/Vibe reuse their open
- * Round; Loop always creates a fresh Round and runs to a terminal state.
+ * New work has two modes. Vibe executes immediately with the build agent.
+ * Loop first builds a read-only, versioned execution contract; autonomous
+ * execution is a separate explicit transition after the plan quality gate.
  */
 export class RoundEngine {
   constructor(private readonly deps: RoundEngineDeps) {}
 
   async submit(input: SubmitInput): Promise<{ roundId: string; outcome: RunOutcome }> {
     const { store } = this.deps
-    const rounds = store.listRounds(input.session.id)
-    const open = rounds.at(-1)
+    const open = store.listRounds(input.session.id).at(-1)
     if (open?.status === 'active' && open.mode !== input.mode) await this.finalize(input.session, open)
-    if (open?.status === 'active' && open.mode === 'loop') await this.finalizeLoopInterrupted(input.session, open)
-    if (input.mode === 'loop') return this.submitLoop(input)
 
     const current = store.listRounds(input.session.id).at(-1)
-    const round = current?.status === 'active' && current.mode === input.mode
+    if (input.mode === 'loop') {
+      const round = current?.status === 'active' && current.mode === 'loop'
+        ? current
+        : this.createRound(input.session, 'loop', input.spec)
+      if (round.loopPhase === 'running') throw new Error('Loop 已开始执行，不能在当前 Run 中修改 Plan。')
+      return this.submitLoopPlan(input, round)
+    }
+
+    const round = current?.status === 'active' && current.mode === 'vibe'
       ? current
-      : this.createRound(input.session, input.mode, input.spec)
-    return this.submitDirect(input, round, input.mode)
+      : this.createRound(input.session, 'vibe', input.spec)
+    return this.submitVibe(input, round)
   }
 
-  private async submitDirect(input: SubmitInput, round: RoundSummary, mode: 'plan' | 'vibe'): Promise<{ roundId: string; outcome: RunOutcome }> {
+  private async submitVibe(input: SubmitInput, round: RoundSummary): Promise<{ roundId: string; outcome: RunOutcome }> {
     const { store } = this.deps
     store.markRoundExecutionStarted(input.session.id, round.id)
     try {
       throwIfCancelled(this.deps.isCancellationRequested)
-      const runtime = await this.deps.ensureRuntime(mode)
+      const runtime = await this.deps.ensureRuntime('vibe')
       throwIfCancelled(this.deps.isCancellationRequested)
       const baselineStartedAt = Date.now()
-      this.deps.onDiagnostic?.('evidence.baseline.start', { mode, roundId: round.id })
+      this.deps.onDiagnostic?.('evidence.baseline.start', { mode: 'vibe', roundId: round.id })
       const baseline = await this.deps.evidence.baseline(input.session.workspacePath)
-      if (mode === 'vibe') store.saveRoundBaseline(round.id, serializeEvidenceSnapshot(baseline))
-      this.deps.onDiagnostic?.('evidence.baseline.end', { mode, roundId: round.id, durationMs: Date.now() - baselineStartedAt })
+      store.saveRoundBaseline(round.id, serializeEvidenceSnapshot(baseline))
+      this.deps.onDiagnostic?.('evidence.baseline.end', { mode: 'vibe', roundId: round.id, durationMs: Date.now() - baselineStartedAt })
       throwIfCancelled(this.deps.isCancellationRequested)
-      // Plan turns carry product-owned guidance on the SAME OpenCode session; the
-      // stored plan version keeps the user's original spec verbatim.
-      const prompt = mode === 'plan' ? planGuidance(input.spec) : input.spec
+
       const promptStartedAt = Date.now()
-      this.deps.onDiagnostic?.('model.prompt.start', { mode, roundId: round.id })
-      const { text } = await runtime.prompt(prompt, { agent: mode === 'plan' ? 'plan' : 'build' })
-      this.deps.onDiagnostic?.('model.prompt.end', { mode, roundId: round.id, durationMs: Date.now() - promptStartedAt, chars: text.length })
+      this.deps.onDiagnostic?.('model.prompt.start', { mode: 'vibe', roundId: round.id })
+      const { text } = await runtime.prompt(input.spec, { agent: 'build' })
+      this.deps.onDiagnostic?.('model.prompt.end', { mode: 'vibe', roundId: round.id, durationMs: Date.now() - promptStartedAt, chars: text.length })
       const toolFacts = (runtime.takeToolFacts?.() ?? []).map((fact) => ({ ...fact, turn: 1 }))
-      const collectStartedAt = Date.now()
-      this.deps.onDiagnostic?.('evidence.collect.start', { mode, roundId: round.id })
       const { bundle } = await this.deps.evidence.collect(
         input.session.workspacePath, baseline, baseline, this.deps.takeEvents(), toolFacts, 'completed'
       )
-      this.deps.onDiagnostic?.('evidence.collect.end', { mode, roundId: round.id, durationMs: Date.now() - collectStartedAt, changedFiles: bundle.changedFiles.length, toolFacts: toolFacts.length })
       this.saveEvidence(round.id, bundle)
-      if (mode === 'plan') {
-        store.appendPlanVersion(round.id, { id: randomUUID(), submittedSpec: input.spec, planMarkdown: text, createdAt: new Date().toISOString() })
-      } else {
-        store.appendVibeEntry(round.id, { id: randomUUID(), specMarkdown: input.spec, assistantOutput: text, executionOutcome: 'completed', createdAt: new Date().toISOString() })
-      }
+      store.appendVibeEntry(round.id, {
+        id: randomUUID(), specMarkdown: input.spec, assistantOutput: text,
+        executionOutcome: 'completed', createdAt: new Date().toISOString()
+      })
       round.bodyMarkdown = text
       round.updatedAt = new Date().toISOString()
       store.saveRound(input.session.id, round)
       store.markRoundExecutionFinished(input.session.id, round.id, 'active')
-      if (round.title === 'New Session' || !round.title) round.title = titleFor(input.spec, mode)
       await this.deps.onRoundChanged?.()
       return { roundId: round.id, outcome: 'completed' }
     } catch (error) {
       if (isCancelled(error, this.deps.isCancellationRequested)) {
-        if (mode === 'vibe') {
-          store.appendVibeEntry(round.id, {
-            id: randomUUID(),
-            specMarkdown: input.spec,
-            assistantOutput: '',
-            executionOutcome: 'interrupted',
-            createdAt: new Date().toISOString()
-          })
-        }
+        store.appendVibeEntry(round.id, {
+          id: randomUUID(), specMarkdown: input.spec, assistantOutput: '',
+          executionOutcome: 'interrupted', createdAt: new Date().toISOString()
+        })
         round.updatedAt = new Date().toISOString()
         store.saveRound(input.session.id, round)
         try { store.markRoundExecutionFinished(input.session.id, round.id, 'active') } catch { /* already inactive */ }
         await this.deps.onRoundChanged?.()
         return { roundId: round.id, outcome: 'interrupted' }
       }
-      if (mode === 'vibe') {
-        const failure = messageOf(error)
-        store.appendVibeEntry(round.id, {
-          id: randomUUID(),
-          specMarkdown: input.spec,
-          assistantOutput: failure ? `执行失败：${failure}` : '执行失败。',
-          executionOutcome: 'failed',
-          createdAt: new Date().toISOString()
-        })
-        round.bodyMarkdown = failure ? `执行失败：${failure}` : '执行失败。'
-        round.updatedAt = new Date().toISOString()
-        store.saveRound(input.session.id, round)
-        // A failed Vibe request is a failed turn, not a terminal Round.
-        // The user can retry or continue the same phase after the runtime is restarted.
-        try { store.markRoundExecutionFinished(input.session.id, round.id, 'active') } catch { /* already inactive */ }
-        await this.deps.onRoundChanged?.()
-        throw error
-      }
-      this.terminate(input.session, round, 'failed')
+      const failure = messageOf(error)
+      store.appendVibeEntry(round.id, {
+        id: randomUUID(), specMarkdown: input.spec,
+        assistantOutput: failure ? `执行失败：${failure}` : '执行失败。',
+        executionOutcome: 'failed', createdAt: new Date().toISOString()
+      })
+      round.bodyMarkdown = failure ? `执行失败：${failure}` : '执行失败。'
+      round.updatedAt = new Date().toISOString()
+      store.saveRound(input.session.id, round)
+      try { store.markRoundExecutionFinished(input.session.id, round.id, 'active') } catch { /* already inactive */ }
       await this.deps.onRoundChanged?.()
+      throw error
+    }
+  }
+
+  private async submitLoopPlan(input: SubmitInput, round: RoundSummary): Promise<{ roundId: string; outcome: RunOutcome }> {
+    const { store } = this.deps
+    round.loopPhase = 'planning'
+    store.saveRound(input.session.id, round)
+    store.markRoundExecutionStarted(input.session.id, round.id)
+    try {
+      throwIfCancelled(this.deps.isCancellationRequested)
+      const runtime = await this.deps.ensureRuntime('loop')
+      throwIfCancelled(this.deps.isCancellationRequested)
+      const baseline = await this.deps.evidence.baseline(input.session.workspacePath)
+      const previous = store.listPlanVersions(round.id).at(-1)
+      const prompt = loopPlanGuidance(input.spec, previous?.planMarkdown)
+      const { text } = await runtime.prompt(prompt, { agent: 'plan' })
+      const toolFacts = (runtime.takeToolFacts?.() ?? []).map((fact) => ({ ...fact, turn: 1 }))
+      const { bundle } = await this.deps.evidence.collect(
+        input.session.workspacePath, baseline, baseline, this.deps.takeEvents(), toolFacts, 'completed'
+      )
+      this.saveEvidence(round.id, bundle)
+
+      const readiness = evaluatePlanReadiness(text)
+      store.appendPlanVersion(round.id, {
+        id: randomUUID(),
+        submittedSpec: input.spec,
+        planMarkdown: text,
+        readiness,
+        createdAt: new Date().toISOString()
+      })
+      round.bodyMarkdown = text
+      round.loopPhase = readiness.ready ? 'ready' : 'planning'
+      round.updatedAt = new Date().toISOString()
+      store.saveRound(input.session.id, round)
+      store.markRoundExecutionFinished(input.session.id, round.id, 'active')
+      await this.deps.onRoundChanged?.()
+      return { roundId: round.id, outcome: 'completed' }
+    } catch (error) {
+      round.loopPhase = 'planning'
+      round.updatedAt = new Date().toISOString()
+      store.saveRound(input.session.id, round)
+      try { store.markRoundExecutionFinished(input.session.id, round.id, 'active') } catch { /* already inactive */ }
+      await this.deps.onRoundChanged?.()
+      if (isCancelled(error, this.deps.isCancellationRequested)) return { roundId: round.id, outcome: 'interrupted' }
       throw error
     }
   }
@@ -206,41 +236,55 @@ export class RoundEngine {
         continue
       }
 
+      const crashedPhase = round.loopPhase
       store.saveResult(round.id, this.deps.resultBuilder.build({
         finalResponse: round.bodyMarkdown,
         evidence,
         outcome: 'interrupted',
         loopTerminal: {
           status: 'interrupted',
-          reason: '应用在 Loop 执行期间退出；已按重启时可观察到的 Workspace 状态恢复结果。'
+          reason: crashedPhase === 'running'
+            ? '应用在 Loop 执行期间退出；已按重启时可观察到的 Workspace 状态恢复结果。'
+            : '应用在 Loop Planning 期间退出；已保留当时能够恢复的 Plan 与证据。'
         },
         round: {
           mode: 'loop',
           turns: [{ spec: round.title, outcome: 'interrupted', output: round.bodyMarkdown }]
         }
       }))
+      round.loopPhase = 'terminal'
+      round.updatedAt = new Date().toISOString()
+      store.saveRound(session.id, round)
     }
   }
 
-  private async submitLoop(input: SubmitInput): Promise<{ roundId: string; outcome: RunOutcome }> {
+  async startLoop(session: SessionSummary): Promise<{ roundId: string; outcome: RunOutcome }> {
     const { store } = this.deps
-    const round = this.createRound(input.session, 'loop', input.spec)
-    store.markRoundExecutionStarted(input.session.id, round.id)
+    const open = store.listRounds(session.id).at(-1)
+    if (!open || open.status !== 'active' || open.mode !== 'loop') throw new Error('当前没有可启动的 Loop Round。')
+    const versions = store.listPlanVersions(open.id)
+    const plan = versions.at(-1)
+    if (!plan?.readiness?.ready) throw new Error('Plan 尚未通过质量门槛，不能启动 Loop。')
+    if (open.loopPhase !== 'ready') throw new Error('Loop Plan 尚未进入 Ready 状态。')
+
+    store.approveLoopPlan(session.id, open.id, plan.id)
+    const round = store.listRounds(session.id).find(item => item.id === open.id) ?? { ...open, loopPhase: 'running' as const, approvedPlanVersionId: plan.id }
+
     let runtime: AgentRuntime | undefined
     let cancellationBaseline: EvidenceWorkspaceSnapshot | undefined
     try {
       throwIfCancelled(this.deps.isCancellationRequested)
       runtime = await this.deps.ensureRuntime('loop')
       throwIfCancelled(this.deps.isCancellationRequested)
-      // Keep a product-owned round baseline so an interrupted Loop can still
-      // project truthful workspace changes into a terminal Result.
-      cancellationBaseline = await this.deps.evidence.baseline(input.session.workspacePath)
+      cancellationBaseline = await this.deps.evidence.baseline(session.workspacePath)
       store.saveRoundBaseline(round.id, serializeEvidenceSnapshot(cancellationBaseline))
+
       const loop = new LoopController(runtime, this.deps.evidence, undefined, Date.now, this.deps.verify)
       const result = await loop.run({
-        rootSpec: input.spec,
-        workspacePath: input.session.workspacePath,
-        permission: input.session.permission,
+        rootSpec: loopAcceptanceSpec(plan.planMarkdown),
+        executionContext: plan.planMarkdown,
+        workspacePath: session.workspacePath,
+        permission: session.permission,
         takeEvents: this.deps.takeEvents,
         isCancelled: this.deps.isCancellationRequested
       })
@@ -255,16 +299,17 @@ export class RoundEngine {
         round: {
           mode: 'loop',
           turns: [{
-            spec: input.spec,
+            spec: plan.planMarkdown,
             outcome: executionOutcome,
             output: result.finalResponse
           }]
         }
       })
       round.status = toRoundStatus(result.terminal.status)
+      round.loopPhase = 'terminal'
       round.bodyMarkdown = result.finalResponse
       round.updatedAt = new Date().toISOString()
-      store.commitRoundTerminal(input.session.id, round, document)
+      store.commitRoundTerminal(session.id, round, document)
       await this.deps.onRoundChanged?.()
       return { roundId: round.id, outcome: result.terminal.status }
     } catch (error) {
@@ -274,7 +319,7 @@ export class RoundEngine {
           try {
             const toolFacts = (runtime?.takeToolFacts?.() ?? []).map((fact) => ({ ...fact, turn: 1 }))
             const collected = await this.deps.evidence.collect(
-              input.session.workspacePath,
+              session.workspacePath,
               cancellationBaseline,
               cancellationBaseline,
               this.deps.takeEvents(),
@@ -284,8 +329,7 @@ export class RoundEngine {
             evidence = collected.bundle
             this.saveEvidence(round.id, evidence)
           } catch {
-            // Cancellation Result must still be saved even if the final
-            // workspace observation itself fails.
+            // Preserve the Result even when the final workspace observation fails.
           }
         }
         const terminal: LoopTerminalSummary = {
@@ -299,16 +343,32 @@ export class RoundEngine {
           loopTerminal: terminal,
           round: {
             mode: 'loop',
-            turns: [{ spec: input.spec, outcome: 'interrupted', output: '' }]
+            turns: [{ spec: plan.planMarkdown, outcome: 'interrupted', output: '' }]
           }
         })
         round.status = 'interrupted'
+        round.loopPhase = 'terminal'
         round.updatedAt = new Date().toISOString()
-        store.commitRoundTerminal(input.session.id, round, document)
+        store.commitRoundTerminal(session.id, round, document)
         await this.deps.onRoundChanged?.()
         return { roundId: round.id, outcome: 'interrupted' }
       }
-      this.terminate(input.session, round, 'failed')
+
+      const evidence = bundleFromRecords(store.listEvidence(round.id), 'failed')
+      const document = this.deps.resultBuilder.build({
+        finalResponse: '',
+        evidence,
+        outcome: 'failed',
+        loopTerminal: { status: 'failed', reason: messageOf(error) },
+        round: {
+          mode: 'loop',
+          turns: [{ spec: plan.planMarkdown, outcome: 'failed', output: '' }]
+        }
+      })
+      round.status = 'failed'
+      round.loopPhase = 'terminal'
+      round.updatedAt = new Date().toISOString()
+      store.commitRoundTerminal(session.id, round, document)
       await this.deps.onRoundChanged?.()
       throw error
     }
@@ -373,6 +433,29 @@ export class RoundEngine {
           }
         })
       }
+    } else if (round.mode === 'loop') {
+      const versions = store.listPlanVersions(round.id)
+      const latest = versions.at(-1)
+      const evidence = bundleFromRecords(store.listEvidence(round.id), 'interrupted')
+      document = this.deps.resultBuilder.build({
+        finalResponse: latest?.planMarkdown ?? '',
+        evidence,
+        outcome: 'interrupted',
+        loopTerminal: {
+          status: 'interrupted',
+          reason: 'Loop 在 Planning 阶段结束，尚未启动自治执行。'
+        },
+        round: {
+          mode: 'loop',
+          turns: [{ spec: latest?.submittedSpec ?? round.title, outcome: 'interrupted', output: latest?.planMarkdown ?? '' }]
+        }
+      })
+      round.status = 'interrupted'
+      round.loopPhase = 'terminal'
+      round.updatedAt = new Date().toISOString()
+      store.commitRoundTerminal(session.id, round, document)
+      await this.deps.onRoundChanged?.()
+      return
     }
 
     round.status = 'completed'
@@ -391,10 +474,6 @@ export class RoundEngine {
     this.deps.store.saveRound(session.id, round)
   }
 
-  private async finalizeLoopInterrupted(session: SessionSummary, round: RoundSummary): Promise<void> {
-    this.terminate(session, round, 'interrupted')
-  }
-
   private createRound(session: SessionSummary, mode: RoundMode, spec: string): RoundSummary {
     const rounds = this.deps.store.listRounds(session.id)
     const title = titleFor(spec, mode)
@@ -409,7 +488,8 @@ export class RoundEngine {
       status: 'active',
       title,
       updatedAt: new Date().toISOString(),
-      bodyMarkdown: ''
+      bodyMarkdown: '',
+      ...(mode === 'loop' ? { loopPhase: 'planning' as const } : {})
     }
     this.deps.store.saveRound(session.id, round)
     return round
@@ -494,6 +574,43 @@ function toRoundStatus(status: LoopTerminalSummary['status']): RoundStatus {
 
 function toExecutionOutcome(status: LoopTerminalSummary['status']): ExecutionOutcome {
   return status === 'budget_exhausted' ? 'failed' : status
+}
+
+function loopAcceptanceSpec(planMarkdown: string): string {
+  const sections = new Map<string, string[]>()
+  let current = ''
+  for (const line of planMarkdown.split(/\r?\n/)) {
+    const heading = /^#{1,6}\s+(.+?)\s*$/.exec(line)
+    if (heading) {
+      current = heading[1].trim().toLowerCase()
+      sections.set(current, [])
+      continue
+    }
+    if (current) sections.get(current)?.push(line)
+  }
+
+  const acceptance = (sections.get('acceptance criteria') ?? []).join('\n').trim()
+  const verificationLines = (sections.get('verification') ?? [])
+    .map(line => /^\s*(?:[-*+] |\d+[.)]\s+)(.+)$/.exec(line)?.[1]?.trim())
+    .filter((line): line is string => Boolean(line))
+    .map(normalizeVerificationRequirement)
+
+  return [
+    acceptance || '- Satisfy every Acceptance Criteria item in the approved Plan.',
+    ...verificationLines
+  ].join('\n')
+}
+
+function normalizeVerificationRequirement(line: string): string {
+  const unquoted = line.replace(/^\`([^\`]+)\`$/, '$1').trim()
+  // Preserve LoopEvaluator's product-owned workspace-write verification path
+  // for common repository checks instead of degrading them to arbitrary shell.
+  if (/\b(typecheck|tsc)\b|类型检查/i.test(unquoted)) return '- Typecheck must pass.'
+  if (/\b(test|tests|pytest)\b|\bgo\s+test\b|\bcargo\s+test\b|测试|单测/i.test(unquoted)) return '- Tests must pass.'
+  if (/\bbuild\b|构建|编译/i.test(unquoted)) return '- Build must pass.'
+  return /^(?:run|verify|check|exec|execute|运行|验证|执行|检查)\s*[:：]/i.test(unquoted)
+    ? unquoted
+    : `Verify: ${unquoted}`
 }
 
 function titleFor(spec: string, mode: RoundMode): string {

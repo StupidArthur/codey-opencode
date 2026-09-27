@@ -6,7 +6,7 @@ Codey 是一个基于 Electron + React 的桌面编程工作区。它把重点�
 
 - Session
 - Round
-- Plan / Vibe / Loop
+- Vibe / Loop
 - Result
 - Runner
 - Evidence
@@ -21,9 +21,11 @@ Codey
 ├─ Electron / React UI
 ├─ Workspace / Session
 ├─ Temporal Round
-│  ├─ Plan
 │  ├─ Vibe
 │  └─ Loop
+│     ├─ Planning / Plan versions
+│     ├─ Plan quality gate
+│     └─ Autonomous execution
 ├─ Result
 ├─ Runner
 ├─ Evidence / Verification
@@ -42,7 +44,7 @@ Codey 负责产品层语义；OpenCode 负责底层 agent 执行。
 
 - Workspace / Session 管理
 - Round 生命周期
-- Plan 版本
+- Loop Plan 版本与质量门槛
 - Vibe 连续对话
 - LoopController
 - Evidence
@@ -64,45 +66,57 @@ Codey 负责产品层语义；OpenCode 负责底层 agent 执行。
 - 工具生命周期
 - backend persistence
 
-## 三种模式
-
-### Plan
-
-用于分析和规划。
-
-Codey 会调用私有 Plan agent，并禁止：
-
-- edit
-- bash
-- task / subagent
-- external directory
-
-Plan 可以持续修改同一个 Round 中的计划版本，但不能修改 Workspace。
+## 两种模式
 
 ### Vibe
 
-用于普通连续 coding 对话。
+用于人主导的连续 coding。
 
 同一个 Vibe Round 中的多次提交：
 
 - 复用同一个 OpenCode Session
-- 连续保留上下文
-- 每次输入 / 输出追加到当前 Round
+- 使用 Codey 私有 Build agent
+- 每次输入 / 输出追加为 Vibe Entry
+- 默认聚焦最新迭代，也可切换为“全部迭代”
 - 直到 End Round 或切换模式
 
 ### Loop
 
-用于长任务和带验收条件的任务。
+Loop 是 Plan 驱动的自治执行，不再把 Plan 作为独立模式。
 
-Loop 由 Codey 的 LoopController 驱动，底层每一轮仍然复用同一个 OpenCode Build agent / Session。
+一个新的 Loop Round 先进入只读 Planning：
 
-Codey 负责：
+```text
+planning → ready → running → terminal
+```
 
-- continuation policy
-- evidence
-- verification
-- completion gate
-- 最终 Result
+Planning 阶段使用 Codey 私有 Plan agent，并禁止 edit / bash / task / external directory。每次补充要求都会生成新的 Plan version。
+
+标准 Plan 包含：
+
+- Goal
+- Scope
+- Current State
+- Implementation
+- Affected Files
+- Acceptance Criteria
+- Verification
+- Constraints
+- Open Questions
+
+Codey 使用产品自己的 Plan quality gate 判断 Plan 是否 Ready；模型不能自行宣告可以执行。只有最新 Plan 满足质量门槛且不存在未提交的 Plan 输入时，用户才能显式点击 **Start Loop**。
+
+Start Loop 后：
+
+- 当前 Plan version 被冻结为 `approvedPlanVersionId`
+- OpenCode 切换到 Build agent
+- 完整 Plan 作为执行上下文
+- Acceptance Criteria + Verification 被投影为 LoopEvaluator 的验收 Spec
+- Codey 的 LoopController 负责 continuation、Evidence、Verification 和 completion gate
+
+执行期间不会悄悄修改 Plan。发现 Plan 假设失效或需要用户输入时，Loop 应进入 blocked / terminal，再由用户重新规划。
+
+旧版本中的独立 Plan Round 仍然可以读取，但不会再用于创建新的工作。
 
 ## Result
 

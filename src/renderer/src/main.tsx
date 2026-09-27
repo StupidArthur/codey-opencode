@@ -3,10 +3,13 @@ import { createRoot } from 'react-dom/client'
 import { EditorView, basicSetup } from 'codemirror'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import type { EvidenceSummary, ModelSettings, PermissionPreset, ResultSummary, RoundDetail, RoundMode, RunOutcome, RunnerEvent, SessionSummary, WorkspaceSnapshot } from '../../shared/contracts'
+import type { EvidenceSummary, InteractiveMode, ModelSettings, PermissionPreset, ResultSummary, RoundDetail, RoundMode, RunOutcome, RunnerEvent, SessionSummary, WorkspaceSnapshot } from '../../shared/contracts'
 import './styles.css'
 
 const modeLabels: Record<RoundMode, string> = { plan: 'Plan', vibe: 'Vibe', loop: 'Loop' }
+const loopPhaseLabels: Record<NonNullable<RoundDetail['loopPhase']>, string> = {
+  planning: 'Planning', ready: 'Ready', running: 'Running', terminal: 'Terminal'
+}
 const statusLabels: Record<string, string> = {
   active: '进行中', completed: '已完成', blocked: '已阻塞', budget_exhausted: '预算已耗尽', failed: '失败', interrupted: '已中断'
 }
@@ -62,49 +65,107 @@ function EvidenceList({ evidence }: { evidence: EvidenceSummary[] }): React.JSX.
   </section>
 }
 
-function RoundView({ round }: { round: RoundDetail }): React.JSX.Element {
+function RoundView({ round, onStartLoop, busy, pendingPlanInput }: {
+  round: RoundDetail
+  onStartLoop: () => void
+  busy: boolean
+  pendingPlanInput: boolean
+}): React.JSX.Element {
   const latestVersionIndex = Math.max(round.planVersions.length - 1, 0)
   const [versionIndex, setVersionIndex] = useState(latestVersionIndex)
   const versionPinned = useRef(false)
-  // When the user explicitly browses an older Plan version, keep that page
-  // stable. New versions surface as a "查看最新" affordance instead of
-  // moving history underneath the cursor.
+  const [vibeView, setVibeView] = useState<'focused' | 'all'>('focused')
+  const [vibeEntryIndex, setVibeEntryIndex] = useState(Math.max(round.vibeEntries.length - 1, 0))
+
   useEffect(() => {
     if (!versionPinned.current) setVersionIndex(latestVersionIndex)
   }, [latestVersionIndex])
+
+  useEffect(() => {
+    setVibeEntryIndex(Math.max(round.vibeEntries.length - 1, 0))
+  }, [round.vibeEntries.length])
+
   const header = <div className="document-header">
-    <div className="eyebrow">ROUND {round.sequence} · {modeLabels[round.mode]}</div>
+    <div className="eyebrow">ROUND {round.sequence} · {modeLabels[round.mode]}{round.mode === 'loop' && round.loopPhase ? ` · ${loopPhaseLabels[round.loopPhase]}` : ''}</div>
     <h1>{round.title}</h1>
     <div className="document-meta"><span className={`status status-${round.status}`}>{statusLabels[round.status]}</span><span>{new Date(round.updatedAt).toLocaleString()}</span></div>
   </div>
 
-  if (round.mode === 'plan') {
+  const renderPlan = (execution = false): React.JSX.Element => {
     const version = round.planVersions[versionIndex]
-    return <article className="document">
-      {header}
+    const readiness = version?.readiness
+    const readyCount = readiness?.checks.filter(check => check.ready).length ?? 0
+    const totalCount = readiness?.checks.length ?? 0
+    const isReadyPhase = round.loopPhase === 'ready'
+    return <>
       {round.planVersions.length > 1 && <div className="version-tabs" role="tablist" aria-label="Plan 版本">
         {round.planVersions.map((item, index) => <button key={item.id} role="tab" aria-selected={index === versionIndex} className={index === versionIndex ? 'active' : ''} onClick={() => { versionPinned.current = true; setVersionIndex(index) }}>v{item.ordinal}</button>)}
         {versionIndex !== latestVersionIndex && <button className="latest-version" onClick={() => { versionPinned.current = false; setVersionIndex(latestVersionIndex) }}>查看最新 v{round.planVersions[latestVersionIndex]?.ordinal}</button>}
       </div>}
-      <div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{version?.planMarkdown || round.bodyMarkdown || '本轮尚无计划。'}</ReactMarkdown></div>
-      {version && version.submittedSpec.trim() && version.submittedSpec.trim() !== (version.planMarkdown ?? '').trim() && <details className="submitted-spec"><summary>本次提交的 Spec</summary><div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{version.submittedSpec}</ReactMarkdown></div></details>}
+      {!execution && round.mode === 'loop' && <section className={`plan-readiness ${isReadyPhase ? 'ready' : ''}`}>
+        <div className="plan-readiness-head">
+          <div><span className="eyebrow">PLAN QUALITY GATE</span><strong>{readiness?.ready ? 'Ready for Loop' : '继续完善 Plan'}</strong></div>
+          <span>{readyCount}/{totalCount || 9}</span>
+        </div>
+        {readiness ? <div className="plan-checks">{readiness.checks.map(check => <div className={`plan-check ${check.ready ? 'ready' : 'missing'}`} key={check.key}><span>{check.ready ? '✓' : '○'}</span><div><strong>{check.label}</strong><small>{check.detail}</small></div></div>)}</div>
+          : <p className="muted">先提交需求生成第一版标准 Loop Plan。</p>}
+        <button className="primary-button start-loop-button" onClick={onStartLoop} disabled={busy || pendingPlanInput || round.status !== 'active' || round.loopPhase !== 'ready' || !readiness?.ready || versionIndex !== latestVersionIndex}>Start Loop</button>
+        {readiness?.ready && versionIndex !== latestVersionIndex && <small className="plan-gate-note">Start Loop 只会冻结并执行最新 Ready Plan。</small>}
+        {readiness?.ready && pendingPlanInput && <small className="plan-gate-note">右侧还有未提交的 Plan 输入；先提交或清空后再 Start Loop。</small>}
+      </section>}
+      {execution && <div className="execution-plan-banner"><span className="eyebrow">APPROVED PLAN</span><strong>{round.approvedPlanVersionId ? `Executing frozen Plan ${round.planVersions.find(item => item.id === round.approvedPlanVersionId)?.ordinal ?? ''}` : 'Executing Loop Plan'}</strong></div>}
+      <div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{version?.planMarkdown || round.bodyMarkdown || '尚未生成 Plan。'}</ReactMarkdown></div>
+      {version && version.submittedSpec.trim() && version.submittedSpec.trim() !== (version.planMarkdown ?? '').trim() && <details className="submitted-spec"><summary>本次用于完善 Plan 的输入</summary><div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{version.submittedSpec}</ReactMarkdown></div></details>}
+    </>
+  }
+
+  if (round.mode === 'plan') {
+    return <article className="document">
+      {header}
+      <div className="legacy-plan-notice">Legacy Plan Round · 新版本中 Plan 已合并进 Loop Planning。</div>
+      {renderPlan(false)}
       <EvidenceList evidence={round.evidence} />
     </article>
   }
 
   if (round.mode === 'vibe') {
+    const focused = round.vibeEntries[vibeEntryIndex]
     return <article className="document">
       {header}
-      {round.result ? <ResultView result={round.result} /> : <div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{round.bodyMarkdown || '本轮尚无结果。'}</ReactMarkdown></div>}
-      {round.vibeEntries.length > 0 && <section className="vibe-timeline"><h3>执行记录</h3>
-        {round.vibeEntries.map(entry => <article className="vibe-entry" key={entry.id}>
-          <div className="vibe-entry-head"><span>#{entry.ordinal}</span><span className="vibe-outcome">{entry.executionOutcome}</span><span className="vibe-time">{new Date(entry.createdAt).toLocaleString()}</span></div>
-          <div className="vibe-entry-body">
-            <div className="vibe-spec"><h4>Spec</h4><div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{entry.specMarkdown}</ReactMarkdown></div></div>
-            <div className="vibe-output"><h4>Output</h4><div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{entry.assistantOutput || '（无输出）'}</ReactMarkdown></div></div>
+      {round.result && <ResultView result={round.result} />}
+      {round.vibeEntries.length > 0 ? <section className="vibe-timeline">
+        <div className="vibe-view-toolbar">
+          <h3>执行记录</h3>
+          <div className="segmented" aria-label="Vibe 阅读方式">
+            <button className={vibeView === 'focused' ? 'active' : ''} onClick={() => setVibeView('focused')}>当前迭代</button>
+            <button className={vibeView === 'all' ? 'active' : ''} onClick={() => setVibeView('all')}>全部迭代</button>
           </div>
-        </article>)}
-      </section>}
+        </div>
+        {vibeView === 'focused' && focused ? <>
+          <div className="vibe-entry-nav">
+            <button onClick={() => setVibeEntryIndex(index => Math.max(0, index - 1))} disabled={vibeEntryIndex <= 0}>←</button>
+            <span>#{focused.ordinal} / {round.vibeEntries.length}</span>
+            <button onClick={() => setVibeEntryIndex(index => Math.min(round.vibeEntries.length - 1, index + 1))} disabled={vibeEntryIndex >= round.vibeEntries.length - 1}>→</button>
+          </div>
+          <VibeEntryView entry={focused} />
+        </> : round.vibeEntries.map(entry => <VibeEntryView entry={entry} key={entry.id} />)}
+      </section> : !round.result && <div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{round.bodyMarkdown || '本轮尚无结果。'}</ReactMarkdown></div>}
+      <EvidenceList evidence={round.evidence} />
+    </article>
+  }
+
+  if (round.loopPhase === 'planning' || round.loopPhase === 'ready') {
+    return <article className="document">
+      {header}
+      {renderPlan(false)}
+      <EvidenceList evidence={round.evidence} />
+    </article>
+  }
+
+  if (round.loopPhase === 'running') {
+    return <article className="document">
+      {header}
+      {renderPlan(true)}
       <EvidenceList evidence={round.evidence} />
     </article>
   }
@@ -112,7 +173,18 @@ function RoundView({ round }: { round: RoundDetail }): React.JSX.Element {
   return <article className="document">
     {header}
     {round.result ? <ResultView result={round.result} /> : <div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{round.bodyMarkdown || '本轮尚未产生终态结果。'}</ReactMarkdown></div>}
+    {round.planVersions.length > 0 && <details className="approved-plan-archive"><summary>查看本轮 Plan</summary>{renderPlan(true)}</details>}
     <EvidenceList evidence={round.evidence} />
+  </article>
+}
+
+function VibeEntryView({ entry }: { entry: RoundDetail['vibeEntries'][number] }): React.JSX.Element {
+  return <article className="vibe-entry" key={entry.id}>
+    <div className="vibe-entry-head"><span>#{entry.ordinal}</span><span className="vibe-outcome">{entry.executionOutcome}</span><span className="vibe-time">{new Date(entry.createdAt).toLocaleString()}</span></div>
+    <div className="vibe-entry-body">
+      <div className="vibe-spec"><h4>Spec</h4><div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{entry.specMarkdown}</ReactMarkdown></div></div>
+      <div className="vibe-output"><h4>Output</h4><div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{entry.assistantOutput || '（无输出）'}</ReactMarkdown></div></div>
+    </div>
   </article>
 }
 
@@ -208,7 +280,7 @@ function App(): React.JSX.Element {
   const [sessions, setSessions] = useState<SessionSummary[]>([])
   const [discoveryError, setDiscoveryError] = useState('')
   const [draft, setDraft] = useState('')
-  const [mode, setMode] = useState<RoundMode>('plan')
+  const [mode, setMode] = useState<InteractiveMode>('vibe')
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [sourceView, setSourceView] = useState(true)
   const [runnerOpen, setRunnerOpen] = useState(false)
@@ -324,7 +396,7 @@ function App(): React.JSX.Element {
     return () => { active = false }
   }, [workspacePath, snapshot?.session?.id])
 
-  function queueDraft(nextDraft: string, nextMode: RoundMode): void {
+  function queueDraft(nextDraft: string, nextMode: InteractiveMode): void {
     localDraftDirty.current = true
     setDraft(nextDraft)
     setMode(nextMode)
@@ -387,6 +459,19 @@ function App(): React.JSX.Element {
     }
   }
 
+  async function startLoop(): Promise<void> {
+    if (!snapshot?.session || snapshot.running || busy) return
+    setBusy(true)
+    setError('')
+    setCancelling(false)
+    setRunnerOpen(true)
+    try {
+      await window.temporal.startLoop()
+      applySnapshot(await window.temporal.getSnapshot())
+    } catch (e) { setError(messageOf(e)) }
+    finally { setBusy(false) }
+  }
+
   async function endRound(): Promise<void> {
     if (!snapshot?.session || snapshot.running) return
     setBusy(true)
@@ -436,7 +521,13 @@ function App(): React.JSX.Element {
   const navigationRound = activeRound ?? latestRound
   const selectedRound = snapshot?.rounds.find(round => round.id === selectedId)
   const viewingHistoricalRound = Boolean(selectedRound && navigationRound && selectedRound.id !== navigationRound.id)
-  const continuesActiveRound = Boolean(activeRound && activeRound.mode === mode && !(snapshot?.running && activeRound.mode === 'loop'))
+  const continuesActiveRound = Boolean(
+    activeRound
+    && activeRound.mode === mode
+    && !(snapshot?.running && activeRound.mode === 'loop')
+    && !(activeRound.mode === 'loop' && activeRound.loopPhase === 'running')
+  )
+  const loopPlanning = Boolean(activeRound?.mode === 'loop' && (activeRound.loopPhase === 'planning' || activeRound.loopPhase === 'ready') && mode === 'loop')
   const submitRoundSequence = continuesActiveRound ? activeRound!.sequence : (latestRound?.sequence ?? 0) + 1
   const runnerMode = activeRound?.mode ?? latestRound?.mode ?? mode
   const runStartedAt = snapshot?.runState.startedAt ? new Date(snapshot.runState.startedAt).getTime() : null
@@ -566,7 +657,7 @@ function App(): React.JSX.Element {
               {sessions.length === 0 && !busy && <p className="empty-sessions">该目录暂无已有 Session；可直接新建。</p>}
               {discoveryError && <p className="empty-sessions" role="alert">Session 发现失败：{discoveryError}</p>}
               <button className="session-row new-session" onClick={() => openSession()} disabled={busy}>
-                <span className="session-icon">＋</span><span className="session-row-copy"><strong>New Session</strong><small>创建后从 Plan 开始</small></span><span className="row-arrow">→</span>
+                <span className="session-icon">＋</span><span className="session-row-copy"><strong>New Session</strong><small>创建后从 Vibe 开始</small></span><span className="row-arrow">→</span>
               </button>
             </div>}
           </div>
@@ -583,13 +674,13 @@ function App(): React.JSX.Element {
           <nav className="timeline" aria-label="Round 列表">
             {snapshot.rounds.map(round => <button key={round.id} className={`timeline-item ${selectedId === round.id ? 'selected' : ''} ${activeRound?.id === round.id ? 'current' : ''}`} onClick={() => selectRound(round.id)} title={`Round ${round.sequence} · ${modeLabels[round.mode]} · ${statusLabels[round.status]}`}>
               <span className="thumbnail-page" data-round={round.sequence}>
-                <span className="thumbnail-eyebrow">{modeLabels[round.mode]} · Round {round.sequence}</span>
+                <span className="thumbnail-eyebrow">{modeLabels[round.mode]}{round.mode === 'loop' && round.loopPhase ? ` · ${loopPhaseLabels[round.loopPhase]}` : ''} · Round {round.sequence}</span>
                 <span className="thumbnail-title">{round.title || `Round ${round.sequence}`}</span>
                 <span className="thumbnail-lines" aria-hidden="true"><i/><i/><i/><i/></span>
                 {activeRound?.id === round.id && <span className="thumbnail-current">当前</span>}
                 <span className={`thumbnail-state state-${round.status}`}>{statusLabels[round.status]}</span>
               </span>
-              <span className="timeline-copy"><strong>{round.title || `Round ${round.sequence}`}</strong><small>{modeLabels[round.mode]}{activeRound?.id === round.id ? ' · 当前' : ''}</small></span>
+              <span className="timeline-copy"><strong>{round.title || `Round ${round.sequence}`}</strong><small>{modeLabels[round.mode]}{round.mode === 'loop' && round.loopPhase ? ` · ${loopPhaseLabels[round.loopPhase]}` : ''}{activeRound?.id === round.id ? ' · 当前' : ''}</small></span>
             </button>)}
           </nav>
           <button
@@ -612,7 +703,7 @@ function App(): React.JSX.Element {
         <section className="result-pane" aria-label="结果页面">
           <div className="result-scroll">
             {viewingHistoricalRound && navigationRound && <div className="history-banner"><div><span>正在查看历史</span><strong>Round {selectedRound?.sequence} · {selectedRound ? modeLabels[selectedRound.mode] : ''}</strong></div><button onClick={returnToCurrentRound}>{activeRound ? '返回当前' : '返回最新'} Round {navigationRound.sequence} →</button></div>}
-            {selectedRound ? <RoundView key={selectedRound.id} round={selectedRound} />
+            {selectedRound ? <RoundView key={selectedRound.id} round={selectedRound} onStartLoop={() => void startLoop()} busy={busy || snapshot.running} pendingPlanInput={mode === 'loop' && Boolean(draft.trim())} />
               : snapshot.historyState === 'backend-unavailable' ? <article className="document"><div className="document-header"><div className="eyebrow">OPENCODE SESSION READY</div><h1>OpenCode runtime ready</h1><p>OpenCode Session 已在后台预热完成，但尚未产生 Temporal Round。第一次提交会沿用该 OpenCode Session 并创建 Round 1。</p></div></article>
               : <div className="blank-state"><div className="blank-symbol">⌁</div><h2>暂无结果</h2><p>在右侧写下目标，选择模式并提交。</p></div>}
           </div>
@@ -627,14 +718,28 @@ function App(): React.JSX.Element {
         </section>
         <div className="pane-resizer pane-resizer-spec" role="separator" aria-orientation="vertical" aria-label="调整 Spec 面板宽度" onPointerDown={event => beginPaneResize('spec', event)} onDoubleClick={() => setSpecWidth(480)} />
         <section className="spec-pane" aria-label="Spec 编辑器">
-          <div className={`spec-context ${snapshot.running ? 'next-spec' : ''}`}>
-            <span className="eyebrow">{snapshot.running ? 'NEXT SPEC' : 'SPEC'}</span>
-            <strong>{continuesActiveRound ? `继续 Round ${activeRound?.sequence} · ${modeLabels[mode]}` : `下一次提交 · Round ${submitRoundSequence} · ${modeLabels[mode]}`}</strong>
-            <small>{snapshot.running ? '当前任务正在执行；这里的内容只用于下一次提交，不会改变当前运行。' : continuesActiveRound ? '本次提交会继续当前 Round。' : activeRound ? `切换模式会结束 Round ${activeRound.sequence}，并创建新 Round。` : '本次提交会创建新的 Round。'}</small>
+          <div className={`spec-context ${snapshot.running ? 'next-spec' : ''} ${loopPlanning ? 'loop-planning' : ''}`}>
+            <span className="eyebrow">{snapshot.running ? 'NEXT SPEC' : loopPlanning ? 'PLAN INPUT' : 'SPEC'}</span>
+            <strong>{loopPlanning
+              ? `完善 Round ${activeRound?.sequence} · Loop Plan`
+              : continuesActiveRound
+                ? `继续 Round ${activeRound?.sequence} · ${modeLabels[mode]}`
+                : `下一次提交 · Round ${submitRoundSequence} · ${modeLabels[mode]}`}</strong>
+            <small>{snapshot.running
+              ? '当前任务正在执行；这里的内容只用于下一次提交，不会改变当前运行。'
+              : loopPlanning
+                ? '本次提交只会让只读 Planning Agent 生成新的 Plan 版本，不会修改 Workspace。通过质量门槛后再 Start Loop。'
+                : continuesActiveRound
+                  ? '本次提交会继续当前 Round。'
+                  : activeRound
+                    ? `切换模式会结束 Round ${activeRound.sequence}，并创建新 Round。`
+                    : mode === 'loop'
+                      ? '先生成标准 Loop Plan；Plan Ready 后由你显式启动自治执行。'
+                      : '本次提交会创建新的 Vibe Round。'}</small>
           </div>
-          <div className="spec-toolbar"><div className="segmented" aria-label="下一次提交模式">{(['plan', 'vibe', 'loop'] as const).map(item => <button key={item} className={mode === item ? 'active' : ''} onClick={() => queueDraft(draft, item)} disabled={busy} aria-pressed={mode === item}>{modeLabels[item]}</button>)}</div><div className="segmented" aria-label="编辑器视图"><button className={sourceView ? 'active' : ''} onClick={() => setSourceView(true)} aria-pressed={sourceView}>Source</button><button className={!sourceView ? 'active' : ''} onClick={() => setSourceView(false)} aria-pressed={!sourceView}>MD</button></div></div>
-          <div className="spec-body"><div className={`editor-container ${sourceView ? '' : 'hidden'}`}><CodeMirrorEditor key={snapshot.session.id} value={draft} onFocus={() => { editorFocused.current = true }} onBlur={() => { editorFocused.current = false }} onChange={value => queueDraft(value, mode)}/>{!draft && <span className="editor-placeholder" aria-hidden="true"># Spec<br/><br/>描述希望完成的工作…</span>}</div><div className={`spec-preview markdown-body ${sourceView ? 'hidden' : ''}`}>{draft.trim() ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{draft}</ReactMarkdown> : <p className="muted">Spec 预览会显示在这里。</p>}</div></div>
-          <div className="spec-footer"><div className="footer-actions"><button className="secondary-button" onClick={endRound} disabled={busy || snapshot.running || !activeRound}>{activeRound ? `结束 Round ${activeRound.sequence}` : '无进行中 Round'}</button><button className="primary-button" onClick={submit} disabled={busy || snapshot.running || !draft.trim()}>{snapshot.running ? '当前任务运行中' : `提交到 Round ${submitRoundSequence}`}</button></div></div>
+          <div className="spec-toolbar"><div className="segmented" aria-label="下一次提交模式">{(['vibe', 'loop'] as const).map(item => <button key={item} className={mode === item ? 'active' : ''} onClick={() => queueDraft(draft, item)} disabled={busy} aria-pressed={mode === item}>{modeLabels[item]}</button>)}</div><div className="segmented" aria-label="编辑器视图"><button className={sourceView ? 'active' : ''} onClick={() => setSourceView(true)} aria-pressed={sourceView}>Source</button><button className={!sourceView ? 'active' : ''} onClick={() => setSourceView(false)} aria-pressed={!sourceView}>MD</button></div></div>
+          <div className="spec-body"><div className={`editor-container ${sourceView ? '' : 'hidden'}`}><CodeMirrorEditor key={snapshot.session.id} value={draft} onFocus={() => { editorFocused.current = true }} onBlur={() => { editorFocused.current = false }} onChange={value => queueDraft(value, mode)}/>{!draft && <span className="editor-placeholder" aria-hidden="true">{loopPlanning ? <># Plan Input<br/><br/>补充范围、验收标准，或回答 Plan 中的 Open Questions…</> : mode === 'loop' ? <># Loop Goal<br/><br/>描述目标；Codey 会先生成标准 Plan，再由你确认启动…</> : <># Spec<br/><br/>描述希望完成的工作…</>}</span>}</div><div className={`spec-preview markdown-body ${sourceView ? 'hidden' : ''}`}>{draft.trim() ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{draft}</ReactMarkdown> : <p className="muted">Spec 预览会显示在这里。</p>}</div></div>
+          <div className="spec-footer"><div className="footer-actions"><button className="secondary-button" onClick={endRound} disabled={busy || snapshot.running || !activeRound}>{activeRound ? `结束 Round ${activeRound.sequence}` : '无进行中 Round'}</button><button className="primary-button" onClick={submit} disabled={busy || snapshot.running || !draft.trim()}>{snapshot.running ? '当前任务运行中' : loopPlanning ? '完善 Plan' : mode === 'loop' ? '生成 Loop Plan' : `提交到 Round ${submitRoundSequence}`}</button></div></div>
         </section>
       </main>}
 

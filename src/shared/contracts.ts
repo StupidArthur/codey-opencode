@@ -1,4 +1,7 @@
 export type RoundMode = 'plan' | 'vibe' | 'loop'
+/** Modes available for new work. `plan` remains only for reading legacy history. */
+export type InteractiveMode = 'vibe' | 'loop'
+export type LoopPhase = 'planning' | 'ready' | 'running' | 'terminal'
 export type RoundStatus = 'active' | 'completed' | 'blocked' | 'budget_exhausted' | 'failed' | 'interrupted'
 export type ExecutionOutcome = 'completed' | 'failed' | 'blocked' | 'interrupted'
 export type RunOutcome = Exclude<RoundStatus, 'active'>
@@ -44,6 +47,23 @@ export interface RoundSummary {
   title: string
   updatedAt: string
   bodyMarkdown: string
+  /** Present for new Loop Rounds. Legacy Loop history may omit it. */
+  loopPhase?: LoopPhase
+  /** Frozen plan version used by the autonomous execution. */
+  approvedPlanVersionId?: string
+}
+
+export interface PlanReadinessCheck {
+  key: 'goal' | 'scope' | 'current-state' | 'implementation' | 'affected-files' | 'acceptance' | 'verification' | 'constraints' | 'open-questions'
+  label: string
+  ready: boolean
+  detail: string
+}
+
+export interface PlanReadinessSummary {
+  ready: boolean
+  checks: PlanReadinessCheck[]
+  missing: string[]
 }
 
 export interface PlanVersionSummary {
@@ -52,6 +72,7 @@ export interface PlanVersionSummary {
   submittedSpec: string
   planMarkdown: string
   createdAt: string
+  readiness?: PlanReadinessSummary
 }
 
 export interface VibeEntrySummary {
@@ -192,7 +213,7 @@ export interface WorkspaceSnapshot {
   /** Explicit state for the legacy-history placeholder; never fakes a History document. */
   historyState: HistoryState
   draft: string
-  mode: RoundMode
+  mode: InteractiveMode
   running: boolean
   /** Fixed execution status for UI chrome; updated independently of Runner event output. */
   runState: RunStateSummary
@@ -207,8 +228,9 @@ export interface TemporalApi {
   listSessions(workspacePath: string): Promise<SessionListResult>
   openSession(workspacePath: string, sessionId?: string): Promise<WorkspaceSnapshot>
   getSnapshot(): Promise<WorkspaceSnapshot>
-  saveDraft(draft: string, mode: RoundMode): Promise<void>
-  submit(spec: string, mode: RoundMode): Promise<void>
+  saveDraft(draft: string, mode: InteractiveMode): Promise<void>
+  submit(spec: string, mode: InteractiveMode): Promise<void>
+  startLoop(): Promise<void>
   cancelRun(): Promise<boolean>
   endRound(): Promise<void>
   setPermission(preset: PermissionPreset): Promise<void>
@@ -225,6 +247,7 @@ export const IPC = {
   getSnapshot: 'workspace:snapshot',
   saveDraft: 'workspace:save-draft',
   submit: 'round:submit',
+  startLoop: 'round:loop:start',
   cancelRun: 'round:cancel',
   endRound: 'round:end',
   setPermission: 'settings:permission:set',
