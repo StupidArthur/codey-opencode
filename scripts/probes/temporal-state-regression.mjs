@@ -30,6 +30,7 @@ const { RoundEngine } = await bundle('src/main/rounds/RoundEngine.ts', join(here
 const { EvidenceCollector } = await bundle('src/main/evidence/EvidenceCollector.ts', join(here, '.cache-state-evidence.cjs'))
 const { ResultBuilder } = await bundle('src/main/result/ResultBuilder.ts', join(here, '.cache-state-result.cjs'))
 const { TURN_CANCELLED_MESSAGE } = await bundle('src/main/runtime/AgentRuntime.ts', join(here, '.cache-state-runtime.cjs'))
+const { UiPreferencesStore } = await bundle('src/main/settings/UiPreferencesStore.ts', join(here, '.cache-state-ui-preferences.cjs'))
 
 const checks = {}
 const check = (name, value) => { checks[name] = Boolean(value) }
@@ -72,6 +73,25 @@ function engineFor(store, runtime, cancellation = () => false) {
   const session = store.createSession(root, undefined, 'Default mode')
   check('new_session_defaults_to_vibe', store.getDraft(session.id).mode === 'vibe')
   store.close()
+}
+
+// Workspace UI preferences live outside Session/Workspace data and safely
+// recover from a missing or malformed ~/.codey/config.json equivalent.
+{
+  const root = await mkdtemp(join(tmpdir(), 'codey-ui-preferences-'))
+  const configPath = join(root, '.codey', 'config.json')
+  const preferences = new UiPreferencesStore(configPath)
+  const defaults = preferences.load()
+  check('ui_preferences_default_sidebar_expanded', defaults.sidebarCollapsed === false)
+  check('ui_preferences_default_runner_closed', defaults.runnerOpen === false)
+
+  const saved = preferences.save({ sidebarCollapsed: true, runnerOpen: true, specPaneRatio: 0.57 })
+  const restored = new UiPreferencesStore(configPath).load()
+  check('ui_preferences_round_trip', saved.sidebarCollapsed && restored.runnerOpen && restored.specPaneRatio === 0.57)
+
+  await writeFile(configPath, '{not-json')
+  const recovered = preferences.load()
+  check('ui_preferences_malformed_config_falls_back', recovered.sidebarCollapsed === false && recovered.runnerOpen === false)
 }
 
 // Vibe request failure is a turn failure, not a terminal Round.
