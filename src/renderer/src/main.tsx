@@ -391,7 +391,7 @@ function App(): React.JSX.Element {
   const currentRound = activeRound ?? latestRound
   const selectedRound = snapshot?.rounds.find(round => round.id === selectedId)
   const viewingHistoricalRound = Boolean(selectedRound && currentRound && selectedRound.id !== currentRound.id)
-  const continuesActiveRound = Boolean(activeRound && activeRound.mode === mode)
+  const continuesActiveRound = Boolean(activeRound && activeRound.mode === mode && !(snapshot?.running && activeRound.mode === 'loop'))
   const submitRoundSequence = continuesActiveRound ? activeRound!.sequence : (latestRound?.sequence ?? 0) + 1
   const runnerEvents = snapshot?.runnerEvents ?? []
   const runnerMode = activeRound?.mode ?? latestRound?.mode ?? mode
@@ -440,7 +440,9 @@ function App(): React.JSX.Element {
   }
 
   function selectRound(id: string): void {
-    selectionPinned.current = true
+    // Clicking the current page means "follow current" again; explicitly
+    // choosing any older page pins history until the user returns.
+    selectionPinned.current = id !== currentRound?.id
     selectedIdRef.current = id
     setSelectedId(id)
   }
