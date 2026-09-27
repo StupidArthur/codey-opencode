@@ -132,7 +132,11 @@ export class RoundEngine {
       const baseline = await this.deps.evidence.baseline(input.session.workspacePath)
       const previous = store.listPlanVersions(round.id).at(-1)
       const prompt = loopPlanGuidance(input.spec, previous?.planMarkdown)
-      const { text } = await runtime.prompt(prompt, { agent: 'plan' })
+      let { text } = await runtime.prompt(prompt, { agent: 'plan' })
+      if (!hasChinesePlanHeadings(text)) {
+        const repaired = await runtime.prompt(chinesePlanRepairPrompt(text), { agent: 'plan' })
+        text = repaired.text
+      }
       const toolFacts = (runtime.takeToolFacts?.() ?? []).map((fact) => ({ ...fact, turn: 1 }))
       const { bundle } = await this.deps.evidence.collect(
         input.session.workspacePath, baseline, baseline, this.deps.takeEvents(), toolFacts, 'completed'
@@ -609,6 +613,33 @@ function loopAcceptanceSpec(planMarkdown: string): string {
   return [
     acceptance || '- 完成已批准 Plan 中能够执行的目标，并基于实际证据判断结果。',
     ...verificationLines
+  ].join('\n')
+}
+
+const CHINESE_PLAN_HEADINGS = [
+  '目标', '范围', '当前状态', '实施方案', '影响文件', '验收标准', '验证', '约束', '待确认问题'
+] as const
+
+function hasChinesePlanHeadings(markdown: string): boolean {
+  const headings = new Set(
+    markdown.split(/\r?\n/)
+      .map(line => /^#{1,6}\s+(.+?)\s*$/.exec(line)?.[1]?.trim())
+      .filter((value): value is string => Boolean(value))
+  )
+  return CHINESE_PLAN_HEADINGS.every(heading => headings.has(heading))
+}
+
+function chinesePlanRepairPrompt(previousOutput: string): string {
+  return [
+    '上一份 Plan 没有满足 Codey 的中文 Plan 格式要求。',
+    '不要实现任务，不要修改 Workspace，也不要运行命令。',
+    '请把下面这份 Plan 完整重写为中文工作文档；代码、文件路径、命令、API 名称和必要技术标识可以保留原文。',
+    '必须严格使用且只使用以下一级标题，并保持顺序：',
+    ...CHINESE_PLAN_HEADINGS.map(heading => `# ${heading}`),
+    '保留原 Plan 中仍然有效的技术事实、步骤、验收标准和待确认问题，不要省略内容，也不要输出解释。',
+    '',
+    '--- 待重写 PLAN ---',
+    previousOutput
   ].join('\n')
 }
 
