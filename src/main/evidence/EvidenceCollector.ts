@@ -138,13 +138,9 @@ export class EvidenceCollector {
     if (bundle.gitDiffSummary) {
       records.push({ id: randomUUID(), kind: 'workspace', label: 'git diff --stat', detail: bundle.gitDiffSummary, outcome: 'observed', provenance: 'tool', observedAt: at(records.length) })
     }
-    for (const fact of bundle.toolFacts) {
-      records.push({
-        id: randomUUID(), kind: 'runtime', label: `tool ${fact.title}`,
-        detail: `${fact.title} ${fact.status}`, outcome: 'observed', provenance: 'tool',
-        observedAt: fact.at, toolCallId: fact.toolCallId, turn: fact.turn
-      })
-    }
+    // Tool-call telemetry (read/edit/bash/etc.) is execution history, not
+    // evidence. It stays in Runner/toolFacts for progress policy and diagnostics
+    // but is deliberately not persisted into the user-facing Evidence section.
     for (const run of bundle.verification) {
       records.push({
         id: run.id, kind: 'command', label: run.label, detail: runDetail(run),
