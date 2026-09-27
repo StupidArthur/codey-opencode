@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { realpath } from 'node:fs/promises'
 import type { BrowserWindow } from 'electron'
 import type {
-  HistoryState, ModelSettings, PermissionPreset, RoundMode, RunOutcome, RunnerEvent,
+  HistoryState, InteractiveMode, ModelSettings, PermissionPreset, RoundMode, RunOutcome, RunnerEvent,
   SessionListResult, SessionSummary, WorkspaceSnapshot
 } from '../shared/contracts'
 import { IPC } from '../shared/contracts'
@@ -133,7 +133,7 @@ export class WindowController {
   async getSnapshot(): Promise<WorkspaceSnapshot> {
     if (this.session) this.session = this.store.getSession(this.session.id) ?? this.session
     const settings = await this.getModelSettings()
-    const draft = this.session ? this.store.getDraft(this.session.id) : { draft: '', mode: 'plan' as RoundMode }
+    const draft = this.session ? this.store.getDraft(this.session.id) : { draft: '', mode: 'vibe' as InteractiveMode }
     const rounds = this.session ? this.store.listRoundDetails(this.session.id) : []
     return {
       workspacePath: this.workspacePath,
@@ -161,7 +161,7 @@ export class WindowController {
     }
   }
 
-  async saveDraft(draft: string, mode: RoundMode): Promise<void> {
+  async saveDraft(draft: string, mode: InteractiveMode): Promise<void> {
     this.assertOwnership()
     const session = this.requireSession()
     this.store.saveDraft(session.id, draft, mode)
@@ -197,7 +197,7 @@ export class WindowController {
     this.prewarmRuntime(snapshot.mode, 'permission.changed')
   }
 
-  async submit(spec: string, mode: RoundMode): Promise<void> {
+  async submit(spec: string, mode: InteractiveMode): Promise<void> {
     this.assertOwnership()
     const session = this.requireSession()
     if (this.running) throw new Error('当前已有执行任务。')
@@ -248,6 +248,61 @@ export class WindowController {
       this.error = undefined
     } finally {
       this.log('submit.finalize', { mode, durationMs: Date.now() - submitStartedAt, cancelRequested: this.cancelRequested })
+      this.running = false
+      this.lastRunFinishedAt = new Date().toISOString()
+      this.lastRunOutcome = finalOutcome ?? (this.cancelRequested ? 'interrupted' : 'failed')
+      this.cancelRequested = false
+      this.activeRunId = undefined
+      this.activeRunStartedAt = undefined
+      this.pendingEvidenceEvents = []
+      await this.emitSnapshot()
+    }
+  }
+
+  async startLoop(): Promise<void> {
+    this.assertOwnership()
+    const session = this.requireSession()
+    if (this.running) throw new Error('当前已有执行任务。')
+    const settings = await this.getModelSettings()
+    if (!settings.provider || !settings.model) throw new Error('请先配置模型 Provider 和 Model。')
+
+    this.cancelScheduledPrewarm()
+    const startedAt = Date.now()
+    this.activeRunId = randomUUID()
+    this.activeRunStartedAt = startedAt
+    this.log('loop.start', {
+      backend: 'opencode',
+      provider: settings.provider,
+      model: settings.model,
+      permission: session.permission,
+      backendSessionId: session.backendSessionId
+    })
+    this.cancelRequested = false
+    this.running = true
+    this.lastRunStartedAt = new Date(startedAt).toISOString()
+    this.lastRunFinishedAt = undefined
+    this.lastRunOutcome = undefined
+    this.error = undefined
+    this.runnerEvents = []
+    this.pendingEvidenceEvents = []
+    await this.emitSnapshot()
+
+    let finalOutcome: RunOutcome | undefined
+    try {
+      const result = await this.engine.startLoop(session)
+      finalOutcome = result.outcome
+      this.log('loop.end', { outcome: result.outcome, roundId: result.roundId, durationMs: Date.now() - startedAt })
+    } catch (error) {
+      this.log('loop.error', { durationMs: Date.now() - startedAt, cancelled: this.cancelRequested, error: messageOf(error) })
+      if (!this.cancelRequested) {
+        finalOutcome = 'failed'
+        this.error = messageOf(error)
+        await this.closeRuntime()
+        throw error
+      }
+      finalOutcome = 'interrupted'
+      this.error = undefined
+    } finally {
       this.running = false
       this.lastRunFinishedAt = new Date().toISOString()
       this.lastRunOutcome = finalOutcome ?? (this.cancelRequested ? 'interrupted' : 'failed')
@@ -326,8 +381,8 @@ export class WindowController {
       .catch(error => this.log('runtime.prewarm.error', { backend: 'opencode', mode, reason, error: messageOf(error) }))
   }
 
-  /** All product modes share one OpenCode runtime/session. The mode only selects
-   *  the agent at prompt time (Plan=plan, Vibe/Loop=build). */
+  /** Vibe and Loop share one OpenCode runtime/session. Loop planning selects
+   *  the read-only plan agent; Loop execution and Vibe select the build agent. */
   private async ensureRuntime(mode: RoundMode): Promise<OpenCodeRuntime> {
     this.assertOwnership()
     if (this.runtime) return this.runtime
