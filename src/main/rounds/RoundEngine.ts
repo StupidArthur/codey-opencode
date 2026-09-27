@@ -1,12 +1,12 @@
 import { randomUUID } from 'node:crypto'
-import type { EvidenceSummary, ExecutionOutcome, LoopTerminalSummary, RoundMode, RoundStatus, RoundSummary, RunOutcome, RunnerEvent, SessionSummary } from '../../shared/contracts'
+import type { EvidenceSummary, ExecutionOutcome, InteractiveMode, LoopTerminalSummary, RoundMode, RoundStatus, RoundSummary, RunOutcome, RunnerEvent, SessionSummary } from '../../shared/contracts'
 import type { AgentRuntime } from '../runtime/AgentRuntime'
 import { TURN_CANCELLED_MESSAGE } from '../runtime/AgentRuntime'
 import type { EvidenceCollector } from '../evidence/EvidenceCollector'
 import type { EvidenceBundle, VerificationExecutorFn, VerificationRun, WorkspaceSnapshot as EvidenceWorkspaceSnapshot } from '../evidence/evidence'
 import { LoopController } from '../loop/LoopController'
 import type { ProductStore } from '../persistence/ProductStore'
-import { planGuidance } from '../plan/PlanGuidance'
+import { evaluatePlanReadiness, loopPlanGuidance } from '../plan/PlanGuidance'
 import type { ResultBuilder } from '../result/ResultBuilder'
 
 export interface RoundEngineDeps {
@@ -28,109 +28,139 @@ export interface RoundEngineDeps {
 
 export interface SubmitInput {
   session: SessionSummary
-  mode: RoundMode
+  mode: InteractiveMode
   spec: string
 }
 
 /**
- * Turns one user submit into a product Round. Plan/Vibe reuse their open
- * Round; Loop always creates a fresh Round and runs to a terminal state.
+ * New work has two modes. Vibe executes immediately with the build agent.
+ * Loop first builds a read-only, versioned execution contract; autonomous
+ * execution is a separate explicit transition after the plan quality gate.
  */
 export class RoundEngine {
   constructor(private readonly deps: RoundEngineDeps) {}
 
   async submit(input: SubmitInput): Promise<{ roundId: string; outcome: RunOutcome }> {
     const { store } = this.deps
-    const rounds = store.listRounds(input.session.id)
-    const open = rounds.at(-1)
+    const open = store.listRounds(input.session.id).at(-1)
     if (open?.status === 'active' && open.mode !== input.mode) await this.finalize(input.session, open)
-    if (open?.status === 'active' && open.mode === 'loop') await this.finalizeLoopInterrupted(input.session, open)
-    if (input.mode === 'loop') return this.submitLoop(input)
 
     const current = store.listRounds(input.session.id).at(-1)
-    const round = current?.status === 'active' && current.mode === input.mode
+    if (input.mode === 'loop') {
+      const round = current?.status === 'active' && current.mode === 'loop'
+        ? current
+        : this.createRound(input.session, 'loop', input.spec)
+      if (round.loopPhase === 'running') throw new Error('Loop 已开始执行，不能在当前 Run 中修改 Plan。')
+      return this.submitLoopPlan(input, round)
+    }
+
+    const round = current?.status === 'active' && current.mode === 'vibe'
       ? current
-      : this.createRound(input.session, input.mode, input.spec)
-    return this.submitDirect(input, round, input.mode)
+      : this.createRound(input.session, 'vibe', input.spec)
+    return this.submitVibe(input, round)
   }
 
-  private async submitDirect(input: SubmitInput, round: RoundSummary, mode: 'plan' | 'vibe'): Promise<{ roundId: string; outcome: RunOutcome }> {
+  private async submitVibe(input: SubmitInput, round: RoundSummary): Promise<{ roundId: string; outcome: RunOutcome }> {
     const { store } = this.deps
     store.markRoundExecutionStarted(input.session.id, round.id)
     try {
       throwIfCancelled(this.deps.isCancellationRequested)
-      const runtime = await this.deps.ensureRuntime(mode)
+      const runtime = await this.deps.ensureRuntime('vibe')
       throwIfCancelled(this.deps.isCancellationRequested)
       const baselineStartedAt = Date.now()
-      this.deps.onDiagnostic?.('evidence.baseline.start', { mode, roundId: round.id })
+      this.deps.onDiagnostic?.('evidence.baseline.start', { mode: 'vibe', roundId: round.id })
       const baseline = await this.deps.evidence.baseline(input.session.workspacePath)
-      if (mode === 'vibe') store.saveRoundBaseline(round.id, serializeEvidenceSnapshot(baseline))
-      this.deps.onDiagnostic?.('evidence.baseline.end', { mode, roundId: round.id, durationMs: Date.now() - baselineStartedAt })
+      store.saveRoundBaseline(round.id, serializeEvidenceSnapshot(baseline))
+      this.deps.onDiagnostic?.('evidence.baseline.end', { mode: 'vibe', roundId: round.id, durationMs: Date.now() - baselineStartedAt })
       throwIfCancelled(this.deps.isCancellationRequested)
-      // Plan turns carry product-owned guidance on the SAME OpenCode session; the
-      // stored plan version keeps the user's original spec verbatim.
-      const prompt = mode === 'plan' ? planGuidance(input.spec) : input.spec
+
       const promptStartedAt = Date.now()
-      this.deps.onDiagnostic?.('model.prompt.start', { mode, roundId: round.id })
-      const { text } = await runtime.prompt(prompt, { agent: mode === 'plan' ? 'plan' : 'build' })
-      this.deps.onDiagnostic?.('model.prompt.end', { mode, roundId: round.id, durationMs: Date.now() - promptStartedAt, chars: text.length })
+      this.deps.onDiagnostic?.('model.prompt.start', { mode: 'vibe', roundId: round.id })
+      const { text } = await runtime.prompt(input.spec, { agent: 'build' })
+      this.deps.onDiagnostic?.('model.prompt.end', { mode: 'vibe', roundId: round.id, durationMs: Date.now() - promptStartedAt, chars: text.length })
       const toolFacts = (runtime.takeToolFacts?.() ?? []).map((fact) => ({ ...fact, turn: 1 }))
-      const collectStartedAt = Date.now()
-      this.deps.onDiagnostic?.('evidence.collect.start', { mode, roundId: round.id })
       const { bundle } = await this.deps.evidence.collect(
         input.session.workspacePath, baseline, baseline, this.deps.takeEvents(), toolFacts, 'completed'
       )
-      this.deps.onDiagnostic?.('evidence.collect.end', { mode, roundId: round.id, durationMs: Date.now() - collectStartedAt, changedFiles: bundle.changedFiles.length, toolFacts: toolFacts.length })
       this.saveEvidence(round.id, bundle)
-      if (mode === 'plan') {
-        store.appendPlanVersion(round.id, { id: randomUUID(), submittedSpec: input.spec, planMarkdown: text, createdAt: new Date().toISOString() })
-      } else {
-        store.appendVibeEntry(round.id, { id: randomUUID(), specMarkdown: input.spec, assistantOutput: text, executionOutcome: 'completed', createdAt: new Date().toISOString() })
-      }
+      store.appendVibeEntry(round.id, {
+        id: randomUUID(), specMarkdown: input.spec, assistantOutput: text,
+        executionOutcome: 'completed', createdAt: new Date().toISOString()
+      })
       round.bodyMarkdown = text
       round.updatedAt = new Date().toISOString()
       store.saveRound(input.session.id, round)
       store.markRoundExecutionFinished(input.session.id, round.id, 'active')
-      if (round.title === 'New Session' || !round.title) round.title = titleFor(input.spec, mode)
       await this.deps.onRoundChanged?.()
       return { roundId: round.id, outcome: 'completed' }
     } catch (error) {
       if (isCancelled(error, this.deps.isCancellationRequested)) {
-        if (mode === 'vibe') {
-          store.appendVibeEntry(round.id, {
-            id: randomUUID(),
-            specMarkdown: input.spec,
-            assistantOutput: '',
-            executionOutcome: 'interrupted',
-            createdAt: new Date().toISOString()
-          })
-        }
+        store.appendVibeEntry(round.id, {
+          id: randomUUID(), specMarkdown: input.spec, assistantOutput: '',
+          executionOutcome: 'interrupted', createdAt: new Date().toISOString()
+        })
         round.updatedAt = new Date().toISOString()
         store.saveRound(input.session.id, round)
         try { store.markRoundExecutionFinished(input.session.id, round.id, 'active') } catch { /* already inactive */ }
         await this.deps.onRoundChanged?.()
         return { roundId: round.id, outcome: 'interrupted' }
       }
-      if (mode === 'vibe') {
-        const failure = messageOf(error)
-        store.appendVibeEntry(round.id, {
-          id: randomUUID(),
-          specMarkdown: input.spec,
-          assistantOutput: failure ? `执行失败：${failure}` : '执行失败。',
-          executionOutcome: 'failed',
-          createdAt: new Date().toISOString()
-        })
-        round.bodyMarkdown = failure ? `执行失败：${failure}` : '执行失败。'
-        round.updatedAt = new Date().toISOString()
-        store.saveRound(input.session.id, round)
-        // A failed Vibe request is a failed turn, not a terminal Round.
-        // The user can retry or continue the same phase after the runtime is restarted.
-        try { store.markRoundExecutionFinished(input.session.id, round.id, 'active') } catch { /* already inactive */ }
-        await this.deps.onRoundChanged?.()
-        throw error
-      }
-      this.terminate(input.session, round, 'failed')
+      const failure = messageOf(error)
+      store.appendVibeEntry(round.id, {
+        id: randomUUID(), specMarkdown: input.spec,
+        assistantOutput: failure ? `执行失败：${failure}` : '执行失败。',
+        executionOutcome: 'failed', createdAt: new Date().toISOString()
+      })
+      round.bodyMarkdown = failure ? `执行失败：${failure}` : '执行失败。'
+      round.updatedAt = new Date().toISOString()
+      store.saveRound(input.session.id, round)
+      try { store.markRoundExecutionFinished(input.session.id, round.id, 'active') } catch { /* already inactive */ }
       await this.deps.onRoundChanged?.()
+      throw error
+    }
+  }
+
+  private async submitLoopPlan(input: SubmitInput, round: RoundSummary): Promise<{ roundId: string; outcome: RunOutcome }> {
+    const { store } = this.deps
+    round.loopPhase = 'planning'
+    store.saveRound(input.session.id, round)
+    store.markRoundExecutionStarted(input.session.id, round.id)
+    try {
+      throwIfCancelled(this.deps.isCancellationRequested)
+      const runtime = await this.deps.ensureRuntime('loop')
+      throwIfCancelled(this.deps.isCancellationRequested)
+      const baseline = await this.deps.evidence.baseline(input.session.workspacePath)
+      const previous = store.listPlanVersions(round.id).at(-1)
+      const prompt = loopPlanGuidance(input.spec, previous?.planMarkdown)
+      const { text } = await runtime.prompt(prompt, { agent: 'plan' })
+      const toolFacts = (runtime.takeToolFacts?.() ?? []).map((fact) => ({ ...fact, turn: 1 }))
+      const { bundle } = await this.deps.evidence.collect(
+        input.session.workspacePath, baseline, baseline, this.deps.takeEvents(), toolFacts, 'completed'
+      )
+      this.saveEvidence(round.id, bundle)
+
+      const readiness = evaluatePlanReadiness(text)
+      store.appendPlanVersion(round.id, {
+        id: randomUUID(),
+        submittedSpec: input.spec,
+        planMarkdown: text,
+        readiness,
+        createdAt: new Date().toISOString()
+      })
+      round.bodyMarkdown = text
+      round.loopPhase = readiness.ready ? 'ready' : 'planning'
+      round.updatedAt = new Date().toISOString()
+      store.saveRound(input.session.id, round)
+      store.markRoundExecutionFinished(input.session.id, round.id, 'active')
+      await this.deps.onRoundChanged?.()
+      return { roundId: round.id, outcome: 'completed' }
+    } catch (error) {
+      round.loopPhase = 'planning'
+      round.updatedAt = new Date().toISOString()
+      store.saveRound(input.session.id, round)
+      try { store.markRoundExecutionFinished(input.session.id, round.id, 'active') } catch { /* already inactive */ }
+      await this.deps.onRoundChanged?.()
+      if (isCancelled(error, this.deps.isCancellationRequested)) return { roundId: round.id, outcome: 'interrupted' }
       throw error
     }
   }
