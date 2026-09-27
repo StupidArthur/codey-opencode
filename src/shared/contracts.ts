@@ -160,6 +160,14 @@ export interface RunnerEvent {
   message: string
 }
 
+export interface RunStateSummary {
+  /** Authoritative product execution state; never inferred from Runner output cadence. */
+  status: 'idle' | 'running' | 'stopping'
+  startedAt?: string
+  finishedAt?: string
+  outcome?: ExecutionOutcome
+}
+
 export interface ModelSettings {
   provider: string
   model: string
@@ -176,6 +184,8 @@ export interface WorkspaceSnapshot {
   draft: string
   mode: RoundMode
   running: boolean
+  /** Fixed execution status for UI chrome; updated independently of Runner event output. */
+  runState: RunStateSummary
   runnerEvents: RunnerEvent[]
   settings: ModelSettings
   permission: PermissionPreset
