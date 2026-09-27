@@ -236,19 +236,25 @@ export class RoundEngine {
         continue
       }
 
+      const crashedPhase = round.loopPhase
       store.saveResult(round.id, this.deps.resultBuilder.build({
         finalResponse: round.bodyMarkdown,
         evidence,
         outcome: 'interrupted',
         loopTerminal: {
           status: 'interrupted',
-          reason: '应用在 Loop 执行期间退出；已按重启时可观察到的 Workspace 状态恢复结果。'
+          reason: crashedPhase === 'running'
+            ? '应用在 Loop 执行期间退出；已按重启时可观察到的 Workspace 状态恢复结果。'
+            : '应用在 Loop Planning 期间退出；已保留当时能够恢复的 Plan 与证据。'
         },
         round: {
           mode: 'loop',
           turns: [{ spec: round.title, outcome: 'interrupted', output: round.bodyMarkdown }]
         }
       }))
+      round.loopPhase = 'terminal'
+      round.updatedAt = new Date().toISOString()
+      store.saveRound(session.id, round)
     }
   }
 
