@@ -252,25 +252,33 @@ export class RoundEngine {
     }
   }
 
-  private async submitLoop(input: SubmitInput): Promise<{ roundId: string; outcome: RunOutcome }> {
+  async startLoop(session: SessionSummary): Promise<{ roundId: string; outcome: RunOutcome }> {
     const { store } = this.deps
-    const round = this.createRound(input.session, 'loop', input.spec)
-    store.markRoundExecutionStarted(input.session.id, round.id)
+    const open = store.listRounds(session.id).at(-1)
+    if (!open || open.status !== 'active' || open.mode !== 'loop') throw new Error('当前没有可启动的 Loop Round。')
+    const versions = store.listPlanVersions(open.id)
+    const plan = versions.at(-1)
+    if (!plan?.readiness?.ready) throw new Error('Plan 尚未通过质量门槛，不能启动 Loop。')
+    if (open.loopPhase !== 'ready') throw new Error('Loop Plan 尚未进入 Ready 状态。')
+
+    store.approveLoopPlan(session.id, open.id, plan.id)
+    const round = store.listRounds(session.id).find(item => item.id === open.id) ?? { ...open, loopPhase: 'running' as const, approvedPlanVersionId: plan.id }
+    store.markRoundExecutionStarted(session.id, round.id)
+
     let runtime: AgentRuntime | undefined
     let cancellationBaseline: EvidenceWorkspaceSnapshot | undefined
     try {
       throwIfCancelled(this.deps.isCancellationRequested)
       runtime = await this.deps.ensureRuntime('loop')
       throwIfCancelled(this.deps.isCancellationRequested)
-      // Keep a product-owned round baseline so an interrupted Loop can still
-      // project truthful workspace changes into a terminal Result.
-      cancellationBaseline = await this.deps.evidence.baseline(input.session.workspacePath)
+      cancellationBaseline = await this.deps.evidence.baseline(session.workspacePath)
       store.saveRoundBaseline(round.id, serializeEvidenceSnapshot(cancellationBaseline))
+
       const loop = new LoopController(runtime, this.deps.evidence, undefined, Date.now, this.deps.verify)
       const result = await loop.run({
-        rootSpec: input.spec,
-        workspacePath: input.session.workspacePath,
-        permission: input.session.permission,
+        rootSpec: loopExecutionSpec(plan.planMarkdown),
+        workspacePath: session.workspacePath,
+        permission: session.permission,
         takeEvents: this.deps.takeEvents,
         isCancelled: this.deps.isCancellationRequested
       })
@@ -285,16 +293,17 @@ export class RoundEngine {
         round: {
           mode: 'loop',
           turns: [{
-            spec: input.spec,
+            spec: plan.planMarkdown,
             outcome: executionOutcome,
             output: result.finalResponse
           }]
         }
       })
       round.status = toRoundStatus(result.terminal.status)
+      round.loopPhase = 'terminal'
       round.bodyMarkdown = result.finalResponse
       round.updatedAt = new Date().toISOString()
-      store.commitRoundTerminal(input.session.id, round, document)
+      store.commitRoundTerminal(session.id, round, document)
       await this.deps.onRoundChanged?.()
       return { roundId: round.id, outcome: result.terminal.status }
     } catch (error) {
@@ -304,7 +313,7 @@ export class RoundEngine {
           try {
             const toolFacts = (runtime?.takeToolFacts?.() ?? []).map((fact) => ({ ...fact, turn: 1 }))
             const collected = await this.deps.evidence.collect(
-              input.session.workspacePath,
+              session.workspacePath,
               cancellationBaseline,
               cancellationBaseline,
               this.deps.takeEvents(),
@@ -314,8 +323,7 @@ export class RoundEngine {
             evidence = collected.bundle
             this.saveEvidence(round.id, evidence)
           } catch {
-            // Cancellation Result must still be saved even if the final
-            // workspace observation itself fails.
+            // Preserve the Result even when the final workspace observation fails.
           }
         }
         const terminal: LoopTerminalSummary = {
@@ -329,16 +337,32 @@ export class RoundEngine {
           loopTerminal: terminal,
           round: {
             mode: 'loop',
-            turns: [{ spec: input.spec, outcome: 'interrupted', output: '' }]
+            turns: [{ spec: plan.planMarkdown, outcome: 'interrupted', output: '' }]
           }
         })
         round.status = 'interrupted'
+        round.loopPhase = 'terminal'
         round.updatedAt = new Date().toISOString()
-        store.commitRoundTerminal(input.session.id, round, document)
+        store.commitRoundTerminal(session.id, round, document)
         await this.deps.onRoundChanged?.()
         return { roundId: round.id, outcome: 'interrupted' }
       }
-      this.terminate(input.session, round, 'failed')
+
+      const evidence = bundleFromRecords(store.listEvidence(round.id), 'failed')
+      const document = this.deps.resultBuilder.build({
+        finalResponse: '',
+        evidence,
+        outcome: 'failed',
+        loopTerminal: { status: 'failed', reason: messageOf(error) },
+        round: {
+          mode: 'loop',
+          turns: [{ spec: plan.planMarkdown, outcome: 'failed', output: '' }]
+        }
+      })
+      round.status = 'failed'
+      round.loopPhase = 'terminal'
+      round.updatedAt = new Date().toISOString()
+      store.commitRoundTerminal(session.id, round, document)
       await this.deps.onRoundChanged?.()
       throw error
     }
@@ -524,6 +548,17 @@ function toRoundStatus(status: LoopTerminalSummary['status']): RoundStatus {
 
 function toExecutionOutcome(status: LoopTerminalSummary['status']): ExecutionOutcome {
   return status === 'budget_exhausted' ? 'failed' : status
+}
+
+function loopExecutionSpec(planMarkdown: string): string {
+  return [
+    'Execute the approved Loop Plan below as the binding execution contract.',
+    'Do not silently change scope or acceptance criteria. If a plan assumption is invalid or user input is required, report blocked rather than inventing a new plan.',
+    'The Acceptance Criteria and Verification sections define what must be proven before completion.',
+    '',
+    '--- APPROVED LOOP PLAN ---',
+    planMarkdown
+  ].join('\n')
 }
 
 function titleFor(spec: string, mode: RoundMode): string {
