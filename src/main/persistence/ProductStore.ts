@@ -658,10 +658,11 @@ export class ProductStore {
         .get(planVersionId, roundId) as { readiness_json: string | null } | undefined
       const readiness = plan?.readiness_json ? JSON.parse(plan.readiness_json) as PlanReadinessSummary : undefined
       if (!plan || readiness?.ready !== true) throw new Error('Only a ready Plan version can start Loop')
-      this.stmt(`
-        UPDATE rounds SET loop_phase = 'running', approved_plan_version_id = ?, updated_at = ?
-        WHERE id = ? AND product_session_id = ?
+      const changed = this.stmt(`
+        UPDATE rounds SET loop_phase = 'running', approved_plan_version_id = ?, runtime_active = 1, updated_at = ?
+        WHERE id = ? AND product_session_id = ? AND status = 'active' AND runtime_active = 0
       `).run(planVersionId, new Date().toISOString(), roundId, sessionId)
+      if (changed.changes !== 1) throw new Error('Loop Round is not available for execution')
     })
   }
 
