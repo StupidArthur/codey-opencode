@@ -276,7 +276,8 @@ export class RoundEngine {
 
       const loop = new LoopController(runtime, this.deps.evidence, undefined, Date.now, this.deps.verify)
       const result = await loop.run({
-        rootSpec: loopExecutionSpec(plan.planMarkdown),
+        rootSpec: loopAcceptanceSpec(plan.planMarkdown),
+        executionContext: plan.planMarkdown,
         workspacePath: session.workspacePath,
         permission: session.permission,
         takeEvents: this.deps.takeEvents,
@@ -570,14 +571,33 @@ function toExecutionOutcome(status: LoopTerminalSummary['status']): ExecutionOut
   return status === 'budget_exhausted' ? 'failed' : status
 }
 
-function loopExecutionSpec(planMarkdown: string): string {
+function loopAcceptanceSpec(planMarkdown: string): string {
+  const sections = new Map<string, string[]>()
+  let current = ''
+  for (const line of planMarkdown.split(/\r?\n/)) {
+    const heading = /^#{1,6}\s+(.+?)\s*$/.exec(line)
+    if (heading) {
+      current = heading[1].trim().toLowerCase()
+      sections.set(current, [])
+      continue
+    }
+    if (current) sections.get(current)?.push(line)
+  }
+
+  const acceptance = (sections.get('acceptance criteria') ?? []).join('\n').trim()
+  const verificationLines = (sections.get('verification') ?? [])
+    .map(line => /^\s*(?:[-*+] |\d+[.)]\s+)(.+)$/.exec(line)?.[1]?.trim())
+    .filter((line): line is string => Boolean(line))
+    .map(line => {
+      const unquoted = line.replace(/^\`([^\`]+)\`$/, '$1')
+      return /^(?:run|verify|check|exec|execute|运行|验证|执行|检查)\s*[:：]/i.test(unquoted)
+        ? unquoted
+        : `Verify: ${unquoted}`
+    })
+
   return [
-    'Execute the approved Loop Plan below as the binding execution contract.',
-    'Do not silently change scope or acceptance criteria. If a plan assumption is invalid or user input is required, report blocked rather than inventing a new plan.',
-    'The Acceptance Criteria and Verification sections define what must be proven before completion.',
-    '',
-    '--- APPROVED LOOP PLAN ---',
-    planMarkdown
+    acceptance || '- Satisfy every Acceptance Criteria item in the approved Plan.',
+    ...verificationLines
   ].join('\n')
 }
 
