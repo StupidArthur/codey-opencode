@@ -140,6 +140,88 @@ export class RoundEngine {
     if (open?.status === 'active') await this.finalize(session, open)
   }
 
+  /** Reconcile executions that died with the app. The store owns the
+   *  runtime_active crash marker; the engine reconstructs the historical
+   *  document so every terminal Round still has a Result. */
+  async reconcileInterrupted(session: SessionSummary): Promise<void> {
+    const { store } = this.deps
+    if (store.reconcileInterruptedRounds(session.id) === 0) return
+
+    for (const round of store.listRounds(session.id)) {
+      if (round.status !== 'interrupted' || store.getResult(round.id)) continue
+      let evidence = bundleFromRecords(store.listEvidence(round.id), 'interrupted')
+      const savedBaseline = store.getRoundBaseline(round.id)
+      if (savedBaseline) {
+        try {
+          const baseline = deserializeEvidenceSnapshot(savedBaseline)
+          const projected = await this.deps.evidence.collect(
+            session.workspacePath, baseline, baseline, [], [], 'interrupted'
+          )
+          projected.bundle.verification = evidence.verification
+          evidence = projected.bundle
+          store.deleteEvidenceKind(round.id, 'workspace')
+          for (const record of this.deps.evidence.toRecords(evidence)) {
+            if (record.kind === 'workspace') store.saveEvidence(round.id, record)
+          }
+        } catch {
+          // Persisted evidence remains the fallback when workspace projection
+          // cannot be reconstructed after a crash.
+        }
+      }
+
+      if (round.mode === 'vibe') {
+        const entries = store.listVibeEntries(round.id)
+        const last = entries.at(-1)
+        store.saveResult(round.id, this.deps.resultBuilder.build({
+          finalResponse: last?.assistantOutput ?? round.bodyMarkdown,
+          evidence,
+          outcome: 'interrupted',
+          round: {
+            mode: 'vibe',
+            turns: entries.map((entry) => ({
+              spec: entry.specMarkdown,
+              outcome: entry.executionOutcome,
+              output: entry.assistantOutput
+            }))
+          }
+        }))
+        continue
+      }
+
+      if (round.mode === 'plan') {
+        const versions = store.listPlanVersions(round.id)
+        store.saveResult(round.id, this.deps.resultBuilder.build({
+          finalResponse: versions.at(-1)?.planMarkdown ?? round.bodyMarkdown,
+          evidence,
+          outcome: 'interrupted',
+          round: {
+            mode: 'plan',
+            turns: versions.map((version) => ({
+              spec: version.submittedSpec,
+              outcome: 'completed' as const,
+              output: version.planMarkdown
+            }))
+          }
+        }))
+        continue
+      }
+
+      store.saveResult(round.id, this.deps.resultBuilder.build({
+        finalResponse: round.bodyMarkdown,
+        evidence,
+        outcome: 'interrupted',
+        loopTerminal: {
+          status: 'interrupted',
+          reason: '应用在 Loop 执行期间退出；已按重启时可观察到的 Workspace 状态恢复结果。'
+        },
+        round: {
+          mode: 'loop',
+          turns: [{ spec: round.title, outcome: 'interrupted', output: round.bodyMarkdown }]
+        }
+      }))
+    }
+  }
+
   private async submitLoop(input: SubmitInput): Promise<{ roundId: string; outcome: RunOutcome }> {
     const { store } = this.deps
     const round = this.createRound(input.session, 'loop', input.spec)
@@ -153,6 +235,7 @@ export class RoundEngine {
       // Keep a product-owned round baseline so an interrupted Loop can still
       // project truthful workspace changes into a terminal Result.
       cancellationBaseline = await this.deps.evidence.baseline(input.session.workspacePath)
+      store.saveRoundBaseline(round.id, serializeEvidenceSnapshot(cancellationBaseline))
       const loop = new LoopController(runtime, this.deps.evidence, undefined, Date.now, this.deps.verify)
       const result = await loop.run({
         rootSpec: input.spec,
