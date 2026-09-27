@@ -93,6 +93,10 @@ export function evaluatePlanReadiness(markdown: string): PlanReadinessSummary {
       const concrete = items.filter(item => /(`[^\`]+`|test|typecheck|build|lint|check|verify|file|content|pnpm|npm|yarn|pytest|cargo|go test|测试|构建|类型检查|文件|内容)/i.test(item))
       ready = concrete.length >= 1
       detail = ready ? `包含 ${concrete.length} 个具体验证方式。` : '至少需要 1 个可执行或可观察的具体验证方式。'
+    } else if (key === 'constraints') {
+      const normalized = body.replace(/[。.!！]/g, '').trim().toLowerCase()
+      ready = body.length >= 8 || /^(none|n\/a|无|没有|暂无)$/.test(normalized)
+      detail = ready ? '约束已明确。' : '请明确约束，或填写 None。'
     } else if (key === 'open-questions') {
       const normalized = body.replace(/[。.!！]/g, '').trim().toLowerCase()
       ready = /^(none|n\/a|无|没有|暂无|无阻塞项)$/.test(normalized)
