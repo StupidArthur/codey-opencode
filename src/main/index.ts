@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { IPC } from '../shared/contracts'
 import { ProductStore } from './persistence/ProductStore'
 import { CredentialVault } from './settings/CredentialVault'
+import { UiPreferencesStore } from './settings/UiPreferencesStore'
 import { WindowController } from './WindowController'
 
 app.setName('Temporal Workspace OpenCode')
@@ -12,6 +13,7 @@ const controllers = new Map<number, WindowController>()
 const pendingDisposals = new Set<Promise<void>>()
 let store: ProductStore
 let vault: CredentialVault
+let uiPreferences: UiPreferencesStore
 let quitReady = false
 
 function trackDisposal(controller: WindowController): void {
@@ -33,6 +35,7 @@ function createWindow(): void {
     minWidth: 1050,
     minHeight: 680,
     show: false,
+    autoHideMenuBar: true,
     title: 'Temporal Workspace OpenCode',
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
@@ -42,6 +45,7 @@ function createWindow(): void {
     }
   })
 
+  window.setMenuBarVisibility(false)
   const webContentsId = window.webContents.id
   controllers.set(webContentsId, new WindowController(window, store, vault, join(app.getPath('userData'), 'opencode-runtime')))
   window.once('ready-to-show', () => window.show())
@@ -76,15 +80,16 @@ function registerIpc(): void {
   ipcMain.handle(IPC.setPermission, (event, preset) => controllerFor(event.sender.id).setPermission(preset))
   ipcMain.handle(IPC.getModelSettings, (event) => controllerFor(event.sender.id).getModelSettings())
   ipcMain.handle(IPC.saveModelSettings, (event, settings) => controllerFor(event.sender.id).saveModelSettings(settings))
+  ipcMain.handle(IPC.getUiPreferences, () => uiPreferences.load())
+  ipcMain.handle(IPC.saveUiPreferences, (_event, preferences) => uiPreferences.save(preferences))
 }
 
 void app.whenReady().then(() => {
   store = new ProductStore(join(app.getPath('userData'), 'temporal-workspace-opencode.sqlite'))
   vault = new CredentialVault(join(app.getPath('userData'), 'model-credential.bin'))
+  uiPreferences = new UiPreferencesStore()
   registerIpc()
-  Menu.setApplicationMenu(Menu.buildFromTemplate([
-    { label: 'File', submenu: [{ label: 'New Window', accelerator: 'CmdOrCtrl+N', click: createWindow }, { role: 'quit' }] }
-  ]))
+  Menu.setApplicationMenu(null)
   createWindow()
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow() })
 })
