@@ -24,6 +24,7 @@ type RoundRow = {
   body_markdown: string
   loop_phase: RoundSummary['loopPhase'] | null
   approved_plan_version_id: string | null
+  approved_plan_forced: number
 }
 
 type DraftRow = { draft: string; mode: RoundMode; revision: number }
@@ -228,6 +229,10 @@ const migrations = [
       CHECK (loop_phase IS NULL OR loop_phase IN ('planning', 'ready', 'running', 'terminal'));
     ALTER TABLE rounds ADD COLUMN approved_plan_version_id TEXT;
     ALTER TABLE plan_versions ADD COLUMN readiness_json TEXT;
+  `,
+  `
+    ALTER TABLE rounds ADD COLUMN approved_plan_forced INTEGER NOT NULL DEFAULT 0
+      CHECK (approved_plan_forced IN (0, 1));
   `
 ] as const
 
@@ -409,7 +414,7 @@ export class ProductStore {
 
   listRounds(sessionId: string): RoundSummary[] {
     const rows = this.stmt(`
-      SELECT id, sequence, mode, status, title, updated_at, body_markdown, loop_phase, approved_plan_version_id
+      SELECT id, sequence, mode, status, title, updated_at, body_markdown, loop_phase, approved_plan_version_id, approved_plan_forced
       FROM rounds WHERE product_session_id = ? ORDER BY sequence ASC
     `).all(sessionId) as RoundRow[]
     return rows.map((row) => ({
@@ -421,7 +426,8 @@ export class ProductStore {
       updatedAt: row.updated_at,
       bodyMarkdown: row.body_markdown,
       ...(row.loop_phase ? { loopPhase: row.loop_phase } : {}),
-      ...(row.approved_plan_version_id ? { approvedPlanVersionId: row.approved_plan_version_id } : {})
+      ...(row.approved_plan_version_id ? { approvedPlanVersionId: row.approved_plan_version_id } : {}),
+      ...(row.approved_plan_forced === 1 ? { approvedPlanForced: true } : {})
     }))
   }
 
@@ -429,20 +435,22 @@ export class ProductStore {
     this.transaction(() => {
       const now = new Date().toISOString()
       const saved = this.stmt(`
-        INSERT INTO rounds(id, product_session_id, sequence, mode, status, title, body_markdown, created_at, updated_at, loop_phase, approved_plan_version_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO rounds(id, product_session_id, sequence, mode, status, title, body_markdown, created_at, updated_at, loop_phase, approved_plan_version_id, approved_plan_forced)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           status = excluded.status,
           title = excluded.title,
           body_markdown = excluded.body_markdown,
           updated_at = excluded.updated_at,
           loop_phase = excluded.loop_phase,
-          approved_plan_version_id = excluded.approved_plan_version_id
+          approved_plan_version_id = excluded.approved_plan_version_id,
+          approved_plan_forced = excluded.approved_plan_forced
         WHERE rounds.product_session_id = excluded.product_session_id
           AND rounds.sequence = excluded.sequence
           AND rounds.mode = excluded.mode
       `).run(round.id, sessionId, round.sequence, round.mode, round.status,
-        round.title, round.bodyMarkdown, now, round.updatedAt, round.loopPhase ?? null, round.approvedPlanVersionId ?? null)
+        round.title, round.bodyMarkdown, now, round.updatedAt, round.loopPhase ?? null,
+        round.approvedPlanVersionId ?? null, round.approvedPlanForced ? 1 : 0)
       if (saved.changes !== 1) {
         throw new Error('Round identity, sequence, or mode cannot change')
       }
@@ -645,28 +653,34 @@ export class ProductStore {
     })
   }
 
-  /** Freeze the latest ready plan before handing control to the build agent. */
-  approveLoopPlan(sessionId: string, roundId: string, planVersionId: string): void {
+  /** Freeze the latest plan before handing control to the build agent.
+   *  Forced approval bypasses only the readiness gate; it never changes which
+   *  Plan version is frozen and remains visible in the historical Round. */
+  approveLoopPlan(sessionId: string, roundId: string, planVersionId: string, force = false): void {
     this.transaction(() => {
       const round = this.stmt(`
         SELECT status, mode, loop_phase FROM rounds WHERE id = ? AND product_session_id = ?
       `).get(roundId, sessionId) as { status: string; mode: RoundMode; loop_phase: string | null } | undefined
-      if (!round || round.mode !== 'loop' || round.status !== 'active' || round.loop_phase !== 'ready') {
-        throw new Error('Loop Plan is not ready to start')
+      const phaseAllowed = round?.loop_phase === 'ready' || (force && round?.loop_phase === 'planning')
+      if (!round || round.mode !== 'loop' || round.status !== 'active' || !phaseAllowed) {
+        throw new Error(force ? 'Loop Plan 当前不能强制启动' : 'Loop Plan 尚未 Ready')
       }
+
       const plan = this.stmt(`
         SELECT id, readiness_json FROM plan_versions
         WHERE round_id = ? ORDER BY ordinal DESC LIMIT 1
       `).get(roundId) as { id: string; readiness_json: string | null } | undefined
-      const readiness = plan?.readiness_json ? JSON.parse(plan.readiness_json) as PlanReadinessSummary : undefined
-      if (!plan || plan.id !== planVersionId || readiness?.ready !== true) {
-        throw new Error('Only the latest ready Plan version can start Loop')
-      }
+      if (!plan || plan.id !== planVersionId) throw new Error('只能启动最新 Plan 版本')
+
+      const readiness = plan.readiness_json ? JSON.parse(plan.readiness_json) as PlanReadinessSummary : undefined
+      if (!force && readiness?.ready !== true) throw new Error('Plan 尚未通过质量门槛')
+
       const changed = this.stmt(`
-        UPDATE rounds SET loop_phase = 'running', approved_plan_version_id = ?, runtime_active = 1, updated_at = ?
+        UPDATE rounds SET loop_phase = 'running', approved_plan_version_id = ?,
+          approved_plan_forced = ?, runtime_active = 1, updated_at = ?
         WHERE id = ? AND product_session_id = ? AND status = 'active' AND runtime_active = 0
-      `).run(planVersionId, new Date().toISOString(), roundId, sessionId)
-      if (changed.changes !== 1) throw new Error('Loop Round is not available for execution')
+      `).run(planVersionId, force ? 1 : 0, new Date().toISOString(), roundId, sessionId)
+      if (changed.changes !== 1) throw new Error('Loop Round 当前不可执行')
     })
   }
 
