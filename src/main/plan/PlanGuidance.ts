@@ -42,7 +42,7 @@ export function loopPlanGuidance(spec: string, previousPlan?: string): string {
     '- Implementation: provide at least two concrete ordered steps, naming components/files where possible.',
     '- Affected Files: list expected workspace paths or clearly identified areas.',
     '- Acceptance Criteria: provide at least two independently judgeable bullet points. Avoid vague phrases such as "works correctly" without observable conditions.',
-    '- Verification: list concrete checks that can actually be executed or observed (tests, typecheck, build, explicit file/content checks).',
+    '- Verification: list concrete checks that can actually be executed or observed. Prefer explicit Tests / Typecheck / Build items when the repository supports them; otherwise name an exact command or file/content check.',
     '- Constraints: record compatibility, safety, permission, migration, or non-goals. Write "None" only when there truly are none.',
     '- Open Questions: unresolved questions that block safe autonomous execution. Write exactly "None" when there are no blockers.',
     '- Do not claim a command has passed; planning is read-only and commands are not executed here.',
