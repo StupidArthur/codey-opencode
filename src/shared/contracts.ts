@@ -42,7 +42,7 @@ export type HistoryState = 'none' | 'backend-unavailable'
 export interface RoundSummary {
   id: string
   sequence: number
-  mode: InteractiveMode
+  mode: RoundMode
   status: RoundStatus
   title: string
   updatedAt: string
@@ -213,7 +213,7 @@ export interface WorkspaceSnapshot {
   /** Explicit state for the legacy-history placeholder; never fakes a History document. */
   historyState: HistoryState
   draft: string
-  mode: RoundMode
+  mode: InteractiveMode
   running: boolean
   /** Fixed execution status for UI chrome; updated independently of Runner event output. */
   runState: RunStateSummary
