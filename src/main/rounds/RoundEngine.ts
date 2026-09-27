@@ -263,7 +263,6 @@ export class RoundEngine {
 
     store.approveLoopPlan(session.id, open.id, plan.id)
     const round = store.listRounds(session.id).find(item => item.id === open.id) ?? { ...open, loopPhase: 'running' as const, approvedPlanVersionId: plan.id }
-    store.markRoundExecutionStarted(session.id, round.id)
 
     let runtime: AgentRuntime | undefined
     let cancellationBaseline: EvidenceWorkspaceSnapshot | undefined
