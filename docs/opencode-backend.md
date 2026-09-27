@@ -2,13 +2,20 @@
 
 This document records the implementation contract for the OpenCode edition of Temporal Workspace.
 
-## Frozen upstream
+## Frozen backend
 
-- OpenCode tag: `v1.18.31`
-- Windows runtime asset: `opencode-windows-x64.zip`
-- Official archive SHA-256: `0ecd7ffc7f26390ce7799e7bcd409e4f11c410144308a6a5b0fcdce63d871006`
+- OpenCode base version: `1.18.31`
+- Fork: `StupidArthur/opencode-fork`
+- Backend source commit: `cf50cd4e9294aaf260e0742ffffefca9181fd64d`
+- Base shell/process patch: `93dbf6f64cbf6402549289cf2eb56ee4c2474c57`
+- Release tag: `codey-opencode-v1.18.31-p1`
+- Windows runtime asset: `opencode-windows-x64-codey.zip`
+- Archive SHA-256: `7e311d2afaa775f705cb251524f48a57fe0d1336d7ea0261e8e9c4c48f272aa5`
+- Extracted `opencode.exe` SHA-256: `03ca853eaae717fa45a5e8bc180707f865e82f7df6089816ebaa6988b67d259a`
 - Runtime transport: authenticated loopback HTTP + SSE
 - Server command: `opencode serve`
+
+The fork remains on the upstream `1.18.31` protocol/version surface. The two Codey patches fix Windows inherited-stdio hangs in both the agent ShellTool path and the public `POST /session/:id/shell` path. No ArthurCode Simple/Loop/TUI product changes are part of the pinned backend artifact.
 
 The packaged runtime is checked through `GET /global/health`; a version other than `1.18.31` is rejected.
 
@@ -179,13 +186,16 @@ Draft save or mode intent starts warmup immediately.
 
 `scripts/prepare-opencode.ps1`:
 
-1. downloads the exact official v1.18.31 Windows x64 archive;
-2. verifies the frozen SHA-256;
+1. downloads the exact Codey backend release asset from the pinned fork tag;
+2. verifies the frozen archive SHA-256;
 3. extracts `opencode.exe`;
-4. checks `opencode --version`;
-5. places it under `vendor/opencode`.
+4. verifies the frozen executable SHA-256;
+5. checks `opencode --version` is exactly `1.18.31`;
+6. places it under `vendor/opencode`.
 
-electron-builder copies the binary into `resources/opencode/opencode.exe`.
+There is no fallback to a system `opencode.exe`. Development fails with an explicit `pnpm prepare:opencode` instruction if the vendored binary is missing; packaged builds require `resources/opencode/opencode.exe`.
+
+electron-builder copies the binary into `resources/opencode/opencode.exe`. Windows CI also packages an unpacked application and verifies the final bundled binary's version and SHA-256.
 
 ## Verification available without a model
 
